@@ -51,18 +51,6 @@ while ($row = $result->fetch_assoc()) {
         $row['options'][] = $option;
     }
     $options_stmt->close();
-    
-    // Проверяем существование файла изображения
-    if ($row['image_path'] && file_exists(__DIR__ . '/' . $row['image_path'])) {
-        $row['image_path_display'] = $row['image_path'];
-    } else {
-        $row['image_path_display'] = null;
-        if ($row['image_path']) {
-            // Если файл не существует, очищаем путь в БД при следующем сохранении
-            $row['image_path'] = null;
-        }
-    }
-    
     $slides[] = $row;
 }
 $stmt->close();
@@ -73,7 +61,6 @@ if (empty($slides)) {
         'id' => 0,
         'question_text' => '',
         'image_path' => null,
-        'image_path_display' => null,
         'font_size' => 24,
         'font_color' => '#000000',
         'slide_order' => 1,
@@ -360,6 +347,13 @@ if ($current_slide_index >= count($slides)) {
             cursor: pointer;
         }
 
+        .points-input {
+            width: 80px;
+            padding: 5px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+
         .shape-badge {
             display: inline-block;
             width: 30px;
@@ -571,16 +565,15 @@ if ($current_slide_index >= count($slides)) {
                 <div class="form-group">
                     <label>🖼️ Изображение</label>
                     <div class="image-upload" onclick="document.getElementById('imageInput').click()">
-                        📤 Нажмите для загрузки изображения (JPG, PNG, GIF, до 5MB)
+                        📤 Нажмите для загрузки изображения (max 5MB)
                         <input type="file" id="imageInput" accept="image/jpeg,image/png,image/gif,image/webp" style="display: none;">
                     </div>
                     <div id="imagePreview" class="image-preview">
                         <?php 
-                        $currentSlide = $slides[$current_slide_index];
-                        if (!empty($currentSlide['image_path_display']) && file_exists(__DIR__ . '/' . $currentSlide['image_path_display'])): 
+                        $currentImage = $slides[$current_slide_index]['image_path'] ?? null;
+                        if ($currentImage && file_exists('uploads/' . $currentImage)): 
                         ?>
-                            <img src="<?php echo htmlspecialchars($currentSlide['image_path_display']); ?>?t=<?php echo time(); ?>">
-                            <button type="button" onclick="removeImage()" style="margin-top: 10px; padding: 5px 10px; background: #dc3545; color: white; border: none; border-radius: 5px; cursor: pointer;">🗑️ Удалить изображение</button>
+                            <img src="uploads/<?php echo htmlspecialchars($currentImage); ?>?t=<?php echo time(); ?>">
                         <?php endif; ?>
                     </div>
                 </div>
@@ -622,7 +615,7 @@ if ($current_slide_index >= count($slides)) {
                                            value="<?php echo htmlspecialchars($option['option_text']); ?>" 
                                            placeholder="Вариант ответа <?php echo $i+1; ?>">
                                 </td>
-                                <td style="width: 120px; text-align: center;">
+                                <td style="width: 100px; text-align: center;">
                                     <input type="checkbox" class="correct-checkbox" data-option-index="<?php echo $i; ?>" 
                                            <?php echo ($option['is_correct'] ?? 0) ? 'checked' : ''; ?>>
                                     <label style="font-size: 12px;">Правильный</label>
@@ -660,7 +653,7 @@ if ($current_slide_index >= count($slides)) {
 
     <script>
         let slidesData = <?php 
-            // Подготавливаем данные для JavaScript, исключая дублирующиеся поля
+            // Подготавливаем данные для JavaScript
             $cleanSlides = [];
             foreach ($slides as $slide) {
                 $cleanSlide = [
@@ -738,17 +731,6 @@ if ($current_slide_index >= count($slides)) {
             duplicateSlide(currentSlideIndex);
         }
         
-        function removeImage() {
-            if (previewMode) return;
-            if (confirm('Удалить изображение?')) {
-                const slide = slidesData[currentSlideIndex];
-                slide.image_path = null;
-                document.getElementById('imagePreview').innerHTML = '';
-                document.getElementById('imagePreview').style.display = 'none';
-                saveAllSlides();
-            }
-        }
-        
         function saveSlide() {
             const slide = slidesData[currentSlideIndex];
             slide.question_text = document.getElementById('questionText').value;
@@ -795,7 +777,7 @@ if ($current_slide_index >= count($slides)) {
             .then(data => {
                 loading.style.display = 'none';
                 if (data.success) {
-                    alert('Сохранено успешно!');
+                    //alert('Сохранено успешно!');
                     window.location.reload();
                 } else {
                     alert('Ошибка сохранения: ' + (data.error || 'Неизвестная ошибка'));
@@ -821,9 +803,7 @@ if ($current_slide_index >= count($slides)) {
             
             const previewImage = document.getElementById('previewImage');
             if (slide.image_path && slide.image_path !== 'null' && slide.image_path !== '') {
-                // Добавляем timestamp для предотвращения кэширования
-                const imageUrl = slide.image_path + (slide.image_path.includes('?') ? '&' : '?') + 't=' + Date.now();
-                previewImage.src = imageUrl;
+                previewImage.src = 'uploads/' + slide.image_path + '?t=' + Date.now();
                 previewImage.style.display = 'block';
             } else {
                 previewImage.style.display = 'none';
@@ -884,17 +864,17 @@ if ($current_slide_index >= count($slides)) {
                     // Проверяем тип файла
                     const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
                     if (!allowedTypes.includes(file.type)) {
-                        alert('Пожалуйста, выберите изображение в формате JPG, PNG, GIF или WEBP');
+                        alert('Пожалуйста, выберите изображение в формате JPEG, PNG, GIF или WEBP');
                         return;
                     }
                     
                     const reader = new FileReader();
                     reader.onload = function(event) {
                         const preview = document.getElementById('imagePreview');
-                        preview.innerHTML = `<img src="${event.target.result}"><button type="button" onclick="removeImage()" style="margin-top: 10px; padding: 5px 10px; background: #dc3545; color: white; border: none; border-radius: 5px; cursor: pointer;">🗑️ Удалить изображение</button>`;
+                        preview.innerHTML = `<img src="${event.target.result}">`;
                         preview.style.display = 'block';
                         
-                        // Сохраняем base64 в слайде
+                        // Сохраняем base64 в слайде, сервер сохранит его как файл
                         const slide = slidesData[currentSlideIndex];
                         slide.image_path = event.target.result;
                         
@@ -906,7 +886,7 @@ if ($current_slide_index >= count($slides)) {
             });
         }
         
-        // Показываем превью изображения при загрузке страницы
+        // Показываем превью изображения при загрузке
         const imagePreviewDiv = document.getElementById('imagePreview');
         if (imagePreviewDiv && imagePreviewDiv.innerHTML.trim() && imagePreviewDiv.querySelector('img')) {
             imagePreviewDiv.style.display = 'block';
@@ -916,38 +896,6 @@ if ($current_slide_index >= count($slides)) {
         if (previewMode) {
             updatePreview();
         }
-        
-        // Автосохранение при потере фокуса
-        let saveTimeout;
-        function autoSave() {
-            clearTimeout(saveTimeout);
-            saveTimeout = setTimeout(() => {
-                if (!previewMode) {
-                    saveSlide();
-                }
-            }, 2000);
-        }
-        
-        // Добавляем автосохранение
-        const questionText = document.getElementById('questionText');
-        if (questionText) {
-            questionText.addEventListener('input', autoSave);
-        }
-        
-        const fontSize = document.getElementById('fontSize');
-        if (fontSize) {
-            fontSize.addEventListener('change', autoSave);
-        }
-        
-        const fontColor = document.getElementById('fontColor');
-        if (fontColor) {
-            fontColor.addEventListener('change', autoSave);
-        }
-        
-        // Добавляем автосохранение для вариантов ответов
-        document.querySelectorAll('.option-input, .correct-checkbox').forEach(el => {
-            el.addEventListener('change', autoSave);
-        });
     </script>
 </body>
 </html>

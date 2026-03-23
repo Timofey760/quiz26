@@ -8,7 +8,7 @@ php_flag engine off
 </FilesMatch>
 
 # Запрещаем доступ к другим файлам
-<FilesMatch "\.(php|phtml|php3|php4|php5|inc)$">
+<FilesMatch "\.(php|phtml|php3|php4|php5|inc|sql|txt)$">
     Order Deny,Allow
     Deny from all
 </FilesMatch>

@@ -1,5 +1,7 @@
 <?php
 session_start();
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
 require_once 'config/database.php';
 
 // Проверка авторизации
@@ -10,59 +12,68 @@ if (!isset($_SESSION['user_id'])) {
 
 $user_id = $_SESSION['user_id'];
 $quiz_id = isset($_GET['id']) ? intval($_GET['id']) : 0;
-$mode = isset($_GET['mode']) ? $_GET['mode'] : 'edit'; // edit или preview
+$mode = isset($_GET['mode']) ? $_GET['mode'] : 'edit';
 
-// Если нет ID викторины, перенаправляем на управление викторинами
-if ($quiz_id === 0 && $mode !== 'manage') {
-    header('Location: dashboard.php?module=quizzes');
+// Если нет ID викторины, перенаправляем на создание
+if ($quiz_id === 0) {
+    header('Location: create_quiz.php');
     exit();
 }
 
 // Получение информации о викторине
 $quiz = null;
-if ($quiz_id > 0) {
-    $stmt = $conn->prepare("SELECT * FROM quizzes WHERE id = ? AND user_id = ?");
-    $stmt->bind_param("ii", $quiz_id, $user_id);
-    $stmt->execute();
-    $result = $stmt->get_result();
-    $quiz = $result->fetch_assoc();
-    $stmt->close();
-    
-    if (!$quiz && $mode !== 'manage') {
-        header('Location: dashboard.php?module=quizzes');
-        exit();
-    }
+$stmt = $conn->prepare("SELECT * FROM quizzes WHERE id = ? AND user_id = ?");
+$stmt->bind_param("ii", $quiz_id, $user_id);
+$stmt->execute();
+$result = $stmt->get_result();
+$quiz = $result->fetch_assoc();
+$stmt->close();
+
+if (!$quiz) {
+    header('Location: dashboard.php');
+    exit();
 }
 
 // Получение всех слайдов викторины
 $slides = [];
-if ($quiz_id > 0) {
-    $stmt = $conn->prepare("SELECT * FROM slides WHERE quiz_id = ? ORDER BY slide_order ASC");
-    $stmt->bind_param("i", $quiz_id);
-    $stmt->execute();
-    $result = $stmt->get_result();
-    while ($row = $result->fetch_assoc()) {
-        // Получение вариантов ответов для слайда
-        $options_stmt = $conn->prepare("SELECT * FROM answer_options WHERE slide_id = ? ORDER BY option_order ASC");
-        $options_stmt->bind_param("i", $row['id']);
-        $options_stmt->execute();
-        $options_result = $options_stmt->get_result();
-        $row['options'] = [];
-        while ($option = $options_result->fetch_assoc()) {
-            $row['options'][] = $option;
-        }
-        $options_stmt->close();
-        $slides[] = $row;
+$stmt = $conn->prepare("SELECT * FROM slides WHERE quiz_id = ? ORDER BY slide_order ASC");
+$stmt->bind_param("i", $quiz_id);
+$stmt->execute();
+$result = $stmt->get_result();
+while ($row = $result->fetch_assoc()) {
+    // Получение вариантов ответов для слайда
+    $options_stmt = $conn->prepare("SELECT * FROM answer_options WHERE slide_id = ? ORDER BY option_order ASC");
+    $options_stmt->bind_param("i", $row['id']);
+    $options_stmt->execute();
+    $options_result = $options_stmt->get_result();
+    $row['options'] = [];
+    while ($option = $options_result->fetch_assoc()) {
+        $row['options'][] = $option;
     }
-    $stmt->close();
+    $options_stmt->close();
+    
+    // Проверяем существование файла изображения
+    if ($row['image_path'] && file_exists(__DIR__ . '/' . $row['image_path'])) {
+        $row['image_path_display'] = $row['image_path'];
+    } else {
+        $row['image_path_display'] = null;
+        if ($row['image_path']) {
+            // Если файл не существует, очищаем путь в БД при следующем сохранении
+            $row['image_path'] = null;
+        }
+    }
+    
+    $slides[] = $row;
 }
+$stmt->close();
 
 // Если слайдов нет, создаем один пустой
-if (empty($slides) && $mode === 'edit') {
+if (empty($slides)) {
     $slides[] = [
         'id' => 0,
         'question_text' => '',
         'image_path' => null,
+        'image_path_display' => null,
         'font_size' => 24,
         'font_color' => '#000000',
         'slide_order' => 1,
@@ -137,6 +148,8 @@ if ($current_slide_index >= count($slides)) {
             cursor: pointer;
             transition: all 0.3s;
             font-size: 14px;
+            text-decoration: none;
+            display: inline-block;
         }
 
         .btn-header:hover {
@@ -164,6 +177,25 @@ if ($current_slide_index >= count($slides)) {
             border-bottom: 1px solid #e0e0e0;
             font-weight: bold;
             font-size: 18px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .btn-add-slide {
+            background: #667eea;
+            color: white;
+            border: none;
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            cursor: pointer;
+            font-size: 18px;
+            transition: all 0.3s;
+        }
+
+        .btn-add-slide:hover {
+            transform: scale(1.1);
         }
 
         .slides-list {
@@ -291,9 +323,14 @@ if ($current_slide_index >= count($slides)) {
 
         .image-preview {
             max-width: 100%;
-            max-height: 200px;
             margin-top: 10px;
             display: none;
+        }
+
+        .image-preview img {
+            max-width: 100%;
+            max-height: 200px;
+            border-radius: 10px;
         }
 
         /* Таблица вариантов ответов */
@@ -314,6 +351,7 @@ if ($current_slide_index >= count($slides)) {
             padding: 8px;
             border: 1px solid #ddd;
             border-radius: 5px;
+            font-size: 14px;
         }
 
         .correct-checkbox {
@@ -322,21 +360,15 @@ if ($current_slide_index >= count($slides)) {
             cursor: pointer;
         }
 
-        .points-input {
-            width: 80px;
-            padding: 5px;
-            border: 1px solid #ddd;
-            border-radius: 5px;
-        }
-
         .shape-badge {
             display: inline-block;
             width: 30px;
             height: 30px;
             line-height: 30px;
             text-align: center;
-            border-radius: 50%;
+            font-size: 20px;
             background: #f0f0f0;
+            border-radius: 50%;
         }
 
         /* Кнопки действий */
@@ -345,6 +377,7 @@ if ($current_slide_index >= count($slides)) {
             gap: 10px;
             margin-top: 30px;
             justify-content: center;
+            flex-wrap: wrap;
         }
 
         .btn {
@@ -386,7 +419,7 @@ if ($current_slide_index >= count($slides)) {
         .preview-container {
             display: flex;
             flex-direction: column;
-            height: 100%;
+            height: calc(100vh - 70px);
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         }
 
@@ -398,13 +431,14 @@ if ($current_slide_index >= count($slides)) {
             align-items: center;
             padding: 40px;
             color: white;
+            overflow-y: auto;
         }
 
         .preview-question {
-            font-size: 32px;
             text-align: center;
             margin-bottom: 40px;
             max-width: 800px;
+            word-wrap: break-word;
         }
 
         .preview-image {
@@ -412,6 +446,7 @@ if ($current_slide_index >= count($slides)) {
             max-height: 300px;
             margin-bottom: 40px;
             border-radius: 10px;
+            object-fit: contain;
         }
 
         .preview-options {
@@ -432,6 +467,7 @@ if ($current_slide_index >= count($slides)) {
             display: flex;
             align-items: center;
             gap: 15px;
+            backdrop-filter: blur(10px);
         }
 
         .preview-option:hover {
@@ -451,6 +487,19 @@ if ($current_slide_index >= count($slides)) {
             background: rgba(0,0,0,0.5);
         }
 
+        .loading {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0,0,0,0.8);
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            z-index: 1000;
+            display: none;
+        }
+
         @media (max-width: 768px) {
             .slides-sidebar {
                 width: 200px;
@@ -459,23 +508,29 @@ if ($current_slide_index >= count($slides)) {
             .preview-options {
                 grid-template-columns: 1fr;
             }
+            
+            .editor-actions {
+                flex-direction: column;
+            }
         }
     </style>
 </head>
 <body>
+    <div class="loading" id="loading">Сохранение...</div>
+    
     <div class="header">
         <div class="logo" onclick="window.location.href='dashboard.php'">🎮 Quiz26</div>
         <div class="quiz-title">
-            <?php echo $mode === 'preview' ? 'Просмотр: ' : 'Редактирование: '; ?>
-            <?php echo htmlspecialchars($quiz['title'] ?? 'Викторина'); ?>
+            <?php echo $mode === 'preview' ? '👁️ Просмотр: ' : '✏️ Редактирование: '; ?>
+            <?php echo htmlspecialchars($quiz['title']); ?>
         </div>
         <div class="header-actions">
             <?php if ($mode === 'edit'): ?>
-                <button class="btn-header" onclick="window.location.href='?id=<?php echo $quiz_id; ?>&mode=preview'">👁️ Просмотр</button>
+                <a href="?id=<?php echo $quiz_id; ?>&mode=preview" class="btn-header">👁️ Просмотр</a>
             <?php else: ?>
-                <button class="btn-header" onclick="window.location.href='?id=<?php echo $quiz_id; ?>&mode=edit'">✏️ Редактировать</button>
+                <a href="?id=<?php echo $quiz_id; ?>&mode=edit" class="btn-header">✏️ Редактировать</a>
             <?php endif; ?>
-            <button class="btn-header" onclick="window.location.href='dashboard.php'">🏠 На главную</button>
+            <a href="dashboard.php" class="btn-header">🏠 На главную</a>
         </div>
     </div>
 
@@ -484,8 +539,8 @@ if ($current_slide_index >= count($slides)) {
         <!-- Боковая панель со слайдами -->
         <div class="slides-sidebar">
             <div class="sidebar-header">
-                Слайды (<?php echo count($slides); ?>)
-                <button class="btn-icon" onclick="addSlide()" style="float: right; background: #667eea; color: white;">+</button>
+                <span>📊 Слайды (<?php echo count($slides); ?>)</span>
+                <button class="btn-add-slide" onclick="addSlide()">+</button>
             </div>
             <div class="slides-list" id="slidesList">
                 <?php foreach ($slides as $index => $slide): ?>
@@ -505,38 +560,41 @@ if ($current_slide_index >= count($slides)) {
 
         <!-- Редактор слайда -->
         <div class="editor-area">
-            <form id="slideForm" class="slide-editor">
-                <input type="hidden" id="slideId" name="slide_id" value="<?php echo $slides[$current_slide_index]['id'] ?? 0; ?>">
-                <input type="hidden" id="slideOrder" name="slide_order" value="<?php echo $current_slide_index + 1; ?>">
+            <div class="slide-editor">
+                <input type="hidden" id="slideId" value="<?php echo $slides[$current_slide_index]['id'] ?? 0; ?>">
                 
                 <div class="form-group">
                     <label>📝 Вопрос</label>
-                    <textarea id="questionText" name="question_text" placeholder="Введите текст вопроса..."><?php echo htmlspecialchars($slides[$current_slide_index]['question_text'] ?? ''); ?></textarea>
+                    <textarea id="questionText" placeholder="Введите текст вопроса..."><?php echo htmlspecialchars($slides[$current_slide_index]['question_text'] ?? ''); ?></textarea>
                 </div>
 
                 <div class="form-group">
                     <label>🖼️ Изображение</label>
                     <div class="image-upload" onclick="document.getElementById('imageInput').click()">
-                        📤 Нажмите для загрузки изображения
-                        <input type="file" id="imageInput" accept="image/*" style="display: none;">
+                        📤 Нажмите для загрузки изображения (JPG, PNG, GIF, до 5MB)
+                        <input type="file" id="imageInput" accept="image/jpeg,image/png,image/gif,image/webp" style="display: none;">
                     </div>
                     <div id="imagePreview" class="image-preview">
-                        <?php if (!empty($slides[$current_slide_index]['image_path'])): ?>
-                            <img src="<?php echo htmlspecialchars($slides[$current_slide_index]['image_path']); ?>" style="max-width: 100%; max-height: 200px;">
+                        <?php 
+                        $currentSlide = $slides[$current_slide_index];
+                        if (!empty($currentSlide['image_path_display']) && file_exists(__DIR__ . '/' . $currentSlide['image_path_display'])): 
+                        ?>
+                            <img src="<?php echo htmlspecialchars($currentSlide['image_path_display']); ?>?t=<?php echo time(); ?>">
+                            <button type="button" onclick="removeImage()" style="margin-top: 10px; padding: 5px 10px; background: #dc3545; color: white; border: none; border-radius: 5px; cursor: pointer;">🗑️ Удалить изображение</button>
                         <?php endif; ?>
                     </div>
                 </div>
 
                 <div class="form-group">
                     <label>🎨 Настройки текста</label>
-                    <div style="display: flex; gap: 10px;">
+                    <div style="display: flex; gap: 10px; flex-wrap: wrap;">
                         <div style="flex: 1;">
                             <label style="font-size: 12px;">Размер шрифта (px)</label>
-                            <input type="number" id="fontSize" name="font_size" value="<?php echo $slides[$current_slide_index]['font_size'] ?? 24; ?>" min="12" max="72">
+                            <input type="number" id="fontSize" value="<?php echo $slides[$current_slide_index]['font_size'] ?? 24; ?>" min="12" max="72" style="width: 100%;">
                         </div>
                         <div style="flex: 1;">
                             <label style="font-size: 12px;">Цвет шрифта</label>
-                            <input type="color" id="fontColor" name="font_color" value="<?php echo $slides[$current_slide_index]['font_color'] ?? '#000000'; ?>">
+                            <input type="color" id="fontColor" value="<?php echo $slides[$current_slide_index]['font_color'] ?? '#000000'; ?>" style="width: 100%; height: 40px;">
                         </div>
                     </div>
                 </div>
@@ -544,33 +602,30 @@ if ($current_slide_index >= count($slides)) {
                 <div class="form-group">
                     <label>💎 Варианты ответов</label>
                     <div style="margin-bottom: 10px;">
-                        <label>Баллов за правильный ответ:</label>
-                        <input type="number" id="points" name="points" value="1" min="1" max="100" style="width: 80px; margin-left: 10px;">
+                        <label style="font-size: 12px;">Баллов за правильный ответ:</label>
+                        <input type="number" id="points" value="1" min="1" max="100" style="width: 80px; margin-left: 10px;">
                     </div>
-                    <table class="options-table" id="optionsTable">
+                    <table class="options-table">
                         <tbody>
                             <?php 
                             $options = $slides[$current_slide_index]['options'];
+                            $shapes = ['●', '■', '◆', '★'];
                             for ($i = 0; $i < 4; $i++): 
-                                $option = $options[$i] ?? ['option_text' => '', 'is_correct' => 0, 'option_order' => $i+1];
+                                $option = isset($options[$i]) ? $options[$i] : ['option_text' => '', 'is_correct' => 0];
                             ?>
                             <tr>
                                 <td style="width: 50px; text-align: center;">
-                                    <span class="shape-badge">
-                                        <?php 
-                                        $shapes = ['●', '■', '◆', '★'];
-                                        echo $shapes[$i];
-                                        ?>
-                                    </span>
+                                    <span class="shape-badge"><?php echo $shapes[$i]; ?></span>
                                 </td>
                                 <td>
                                     <input type="text" class="option-input" data-option-index="<?php echo $i; ?>" 
                                            value="<?php echo htmlspecialchars($option['option_text']); ?>" 
                                            placeholder="Вариант ответа <?php echo $i+1; ?>">
                                 </td>
-                                <td style="width: 80px; text-align: center;">
+                                <td style="width: 120px; text-align: center;">
                                     <input type="checkbox" class="correct-checkbox" data-option-index="<?php echo $i; ?>" 
-                                           <?php echo $option['is_correct'] ? 'checked' : ''; ?>>
+                                           <?php echo ($option['is_correct'] ?? 0) ? 'checked' : ''; ?>>
+                                    <label style="font-size: 12px;">Правильный</label>
                                 </td>
                             </tr>
                             <?php endfor; ?>
@@ -584,37 +639,53 @@ if ($current_slide_index >= count($slides)) {
                     <button type="button" class="btn btn-success" onclick="duplicateCurrentSlide()">📋 Дублировать</button>
                     <button type="button" class="btn btn-danger" onclick="deleteCurrentSlide()">🗑️ Удалить слайд</button>
                 </div>
-            </form>
+            </div>
         </div>
     </div>
     <?php else: ?>
     <!-- Режим просмотра -->
     <div class="preview-container">
         <div class="preview-slide" id="previewSlide">
-            <div class="preview-question" id="previewQuestion" style="font-size: 32px; color: white;"></div>
+            <div class="preview-question" id="previewQuestion"></div>
             <img id="previewImage" class="preview-image" style="display: none;">
             <div class="preview-options" id="previewOptions"></div>
         </div>
         <div class="preview-controls">
             <button class="btn btn-primary" onclick="previousSlide()">◀ Предыдущий</button>
-            <span id="slideCounter" style="color: white; padding: 10px;">Слайд 1 / 1</span>
+            <span id="slideCounter" style="color: white; padding: 10px; background: rgba(0,0,0,0.5); border-radius: 20px;">Слайд 1 / 1</span>
             <button class="btn btn-primary" onclick="nextSlide()">Следующий ▶</button>
         </div>
     </div>
     <?php endif; ?>
 
     <script>
-        let slidesData = <?php echo json_encode($slides); ?>;
+        let slidesData = <?php 
+            // Подготавливаем данные для JavaScript, исключая дублирующиеся поля
+            $cleanSlides = [];
+            foreach ($slides as $slide) {
+                $cleanSlide = [
+                    'id' => $slide['id'],
+                    'question_text' => $slide['question_text'],
+                    'image_path' => $slide['image_path'],
+                    'font_size' => $slide['font_size'],
+                    'font_color' => $slide['font_color'],
+                    'slide_order' => $slide['slide_order'],
+                    'options' => $slide['options']
+                ];
+                $cleanSlides[] = $cleanSlide;
+            }
+            echo json_encode($cleanSlides, JSON_UNESCAPED_UNICODE); 
+        ?>;
         let currentSlideIndex = <?php echo $current_slide_index; ?>;
         let quizId = <?php echo $quiz_id; ?>;
         let previewMode = <?php echo $mode === 'preview' ? 'true' : 'false'; ?>;
-
+        
         // Функции для редактора
         function selectSlide(index) {
             if (previewMode) return;
             window.location.href = `?id=${quizId}&mode=edit&slide=${index}`;
         }
-
+        
         function addSlide() {
             if (previewMode) return;
             const newSlide = {
@@ -634,38 +705,50 @@ if ($current_slide_index >= count($slides)) {
             slidesData.push(newSlide);
             saveAllSlides();
         }
-
+        
         function deleteSlide(index) {
             if (previewMode) return;
+            if (slidesData.length === 1) {
+                alert('Нельзя удалить единственный слайд');
+                return;
+            }
             if (confirm('Удалить этот слайд?')) {
                 slidesData.splice(index, 1);
-                if (slidesData.length === 0) {
-                    addSlide();
-                }
                 if (currentSlideIndex >= slidesData.length) {
                     currentSlideIndex = slidesData.length - 1;
                 }
                 saveAllSlides();
             }
         }
-
+        
         function deleteCurrentSlide() {
             deleteSlide(currentSlideIndex);
         }
-
+        
         function duplicateSlide(index) {
             if (previewMode) return;
             const duplicated = JSON.parse(JSON.stringify(slidesData[index]));
             duplicated.id = 0;
-            duplicated.question_text += ' (копия)';
+            duplicated.question_text = duplicated.question_text + ' (копия)';
             slidesData.splice(index + 1, 0, duplicated);
             saveAllSlides();
         }
-
+        
         function duplicateCurrentSlide() {
             duplicateSlide(currentSlideIndex);
         }
-
+        
+        function removeImage() {
+            if (previewMode) return;
+            if (confirm('Удалить изображение?')) {
+                const slide = slidesData[currentSlideIndex];
+                slide.image_path = null;
+                document.getElementById('imagePreview').innerHTML = '';
+                document.getElementById('imagePreview').style.display = 'none';
+                saveAllSlides();
+            }
+        }
+        
         function saveSlide() {
             const slide = slidesData[currentSlideIndex];
             slide.question_text = document.getElementById('questionText').value;
@@ -684,11 +767,25 @@ if ($current_slide_index >= count($slides)) {
             
             saveAllSlides();
         }
-
+        
         function saveAllSlides() {
+            const loading = document.getElementById('loading');
+            loading.style.display = 'block';
+            
+            // Создаем копию данных для отправки
+            const slidesToSave = slidesData.map(slide => ({
+                id: slide.id,
+                question_text: slide.question_text,
+                image_path: slide.image_path,
+                font_size: slide.font_size,
+                font_color: slide.font_color,
+                slide_order: slide.slide_order,
+                options: slide.options
+            }));
+            
             const formData = new FormData();
             formData.append('quiz_id', quizId);
-            formData.append('slides', JSON.stringify(slidesData));
+            formData.append('slides', JSON.stringify(slidesToSave));
             
             fetch('save_quiz.php', {
                 method: 'POST',
@@ -696,18 +793,21 @@ if ($current_slide_index >= count($slides)) {
             })
             .then(response => response.json())
             .then(data => {
+                loading.style.display = 'none';
                 if (data.success) {
                     alert('Сохранено успешно!');
                     window.location.reload();
                 } else {
-                    alert('Ошибка сохранения: ' + data.error);
+                    alert('Ошибка сохранения: ' + (data.error || 'Неизвестная ошибка'));
                 }
             })
             .catch(error => {
-                alert('Ошибка: ' + error);
+                loading.style.display = 'none';
+                console.error('Error:', error);
+                alert('Ошибка соединения: ' + error.message);
             });
         }
-
+        
         // Функции для просмотра
         function updatePreview() {
             if (!previewMode) return;
@@ -720,8 +820,10 @@ if ($current_slide_index >= count($slides)) {
             previewQuestion.style.color = slide.font_color || '#ffffff';
             
             const previewImage = document.getElementById('previewImage');
-            if (slide.image_path) {
-                previewImage.src = slide.image_path;
+            if (slide.image_path && slide.image_path !== 'null' && slide.image_path !== '') {
+                // Добавляем timestamp для предотвращения кэширования
+                const imageUrl = slide.image_path + (slide.image_path.includes('?') ? '&' : '?') + 't=' + Date.now();
+                previewImage.src = imageUrl;
                 previewImage.style.display = 'block';
             } else {
                 previewImage.style.display = 'none';
@@ -730,17 +832,20 @@ if ($current_slide_index >= count($slides)) {
             const previewOptions = document.getElementById('previewOptions');
             const shapes = ['●', '■', '◆', '★'];
             previewOptions.innerHTML = '';
-            slide.options.forEach((option, idx) => {
-                if (option.option_text) {
-                    const optionDiv = document.createElement('div');
-                    optionDiv.className = 'preview-option';
-                    optionDiv.innerHTML = `
-                        <div class="option-shape">${shapes[idx]}</div>
-                        <div style="flex: 1;">${escapeHtml(option.option_text)}</div>
-                    `;
-                    previewOptions.appendChild(optionDiv);
-                }
-            });
+            if (slide.options) {
+                slide.options.forEach((option, idx) => {
+                    if (option.option_text && option.option_text.trim()) {
+                        const optionDiv = document.createElement('div');
+                        optionDiv.className = 'preview-option';
+                        optionDiv.innerHTML = `
+                            <div class="option-shape">${shapes[idx]}</div>
+                            <div style="flex: 1; text-align: left;">${escapeHtml(option.option_text)}</div>
+                            ${option.is_correct ? '<div style="color: #4caf50;">✓ Правильно</div>' : ''}
+                        `;
+                        previewOptions.appendChild(optionDiv);
+                    }
+                });
+            }
             
             document.getElementById('slideCounter').textContent = `Слайд ${currentSlideIndex + 1} / ${slidesData.length}`;
         }
@@ -766,27 +871,83 @@ if ($current_slide_index >= count($slides)) {
         }
         
         // Загрузка изображения
-        document.getElementById('imageInput')?.addEventListener('change', function(e) {
-            const file = e.target.files[0];
-            if (file) {
-                const reader = new FileReader();
-                reader.onload = function(event) {
-                    const preview = document.getElementById('imagePreview');
-                    preview.innerHTML = `<img src="${event.target.result}" style="max-width: 100%; max-height: 200px;">`;
-                    preview.style.display = 'block';
+        if (document.getElementById('imageInput')) {
+            document.getElementById('imageInput').addEventListener('change', function(e) {
+                const file = e.target.files[0];
+                if (file) {
+                    // Проверяем размер файла (макс 5MB)
+                    if (file.size > 5 * 1024 * 1024) {
+                        alert('Файл слишком большой. Максимальный размер 5MB');
+                        return;
+                    }
                     
-                    // Сохраняем путь к изображению
-                    const slide = slidesData[currentSlideIndex];
-                    slide.image_path = event.target.result;
-                };
-                reader.readAsDataURL(file);
-            }
-        });
+                    // Проверяем тип файла
+                    const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+                    if (!allowedTypes.includes(file.type)) {
+                        alert('Пожалуйста, выберите изображение в формате JPG, PNG, GIF или WEBP');
+                        return;
+                    }
+                    
+                    const reader = new FileReader();
+                    reader.onload = function(event) {
+                        const preview = document.getElementById('imagePreview');
+                        preview.innerHTML = `<img src="${event.target.result}"><button type="button" onclick="removeImage()" style="margin-top: 10px; padding: 5px 10px; background: #dc3545; color: white; border: none; border-radius: 5px; cursor: pointer;">🗑️ Удалить изображение</button>`;
+                        preview.style.display = 'block';
+                        
+                        // Сохраняем base64 в слайде
+                        const slide = slidesData[currentSlideIndex];
+                        slide.image_path = event.target.result;
+                        
+                        // Автоматически сохраняем
+                        saveAllSlides();
+                    };
+                    reader.readAsDataURL(file);
+                }
+            });
+        }
+        
+        // Показываем превью изображения при загрузке страницы
+        const imagePreviewDiv = document.getElementById('imagePreview');
+        if (imagePreviewDiv && imagePreviewDiv.innerHTML.trim() && imagePreviewDiv.querySelector('img')) {
+            imagePreviewDiv.style.display = 'block';
+        }
         
         // Инициализация просмотра
         if (previewMode) {
             updatePreview();
         }
+        
+        // Автосохранение при потере фокуса
+        let saveTimeout;
+        function autoSave() {
+            clearTimeout(saveTimeout);
+            saveTimeout = setTimeout(() => {
+                if (!previewMode) {
+                    saveSlide();
+                }
+            }, 2000);
+        }
+        
+        // Добавляем автосохранение
+        const questionText = document.getElementById('questionText');
+        if (questionText) {
+            questionText.addEventListener('input', autoSave);
+        }
+        
+        const fontSize = document.getElementById('fontSize');
+        if (fontSize) {
+            fontSize.addEventListener('change', autoSave);
+        }
+        
+        const fontColor = document.getElementById('fontColor');
+        if (fontColor) {
+            fontColor.addEventListener('change', autoSave);
+        }
+        
+        // Добавляем автосохранение для вариантов ответов
+        document.querySelectorAll('.option-input, .correct-checkbox').forEach(el => {
+            el.addEventListener('change', autoSave);
+        });
     </script>
 </body>
 </html>

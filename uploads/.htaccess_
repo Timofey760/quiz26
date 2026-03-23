@@ -1,0 +1,14 @@
+# Запрещаем выполнение PHP в папке с загрузками
+php_flag engine off
+
+# Разрешаем только изображения
+<FilesMatch "\.(jpg|jpeg|png|gif|webp)$">
+    Order Allow,Deny
+    Allow from all
+</FilesMatch>
+
+# Запрещаем доступ к другим файлам
+<FilesMatch "\.(php|phtml|php3|php4|php5|inc)$">
+    Order Deny,Allow
+    Deny from all
+</FilesMatch>

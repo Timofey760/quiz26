@@ -2,7 +2,7 @@
 // config/database.php
 define('DB_HOST', 'localhost');
 define('DB_USER', 'root');
-define('DB_PASS', '123456'); // Если у вас есть пароль для MySQL, укажите его
+define('DB_PASS', ''); // Если у вас есть пароль для MySQL, укажите его
 define('DB_NAME', 'quiz26');
 
 // Создание подключения

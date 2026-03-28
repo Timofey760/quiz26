@@ -1,6 +1,5 @@
 const WebSocket = require('ws');
 const http = require('http');
-const url = require('url');
 const mysql = require('mysql2');
 
 // Конфигурация базы данных
@@ -24,8 +23,6 @@ const wss = new WebSocket.Server({ server });
 
 // Хранилище активных игр
 const games = new Map();
-// Хранилище подключенных игроков
-const players = new Map();
 
 // Функция генерации случайного кода
 function generateGameCode() {
@@ -57,18 +54,182 @@ function sendToHost(gameCode, message) {
     }
 }
 
+// Расчёт очков за правильный ответ в зависимости от скорости
+function calculatePoints(responseTime, slideDurationMs) {
+    const maxPoints = 1000;
+    const minPoints = 100;
+    // responseTime в миллисекундах, slideDurationMs в миллисекундах
+    const ratio = Math.max(0, Math.min(1, 1 - (responseTime / slideDurationMs)));
+    return Math.floor(minPoints + (maxPoints - minPoints) * ratio);
+}
+
+// Переход к следующему слайду
+function nextSlide(gameCode) {
+    const game = games.get(gameCode);
+    if (!game || game.status !== 'active') return;
+    
+    game.currentSlide++;
+    // Очищаем ответы для нового слайда
+    game.currentSlideAnswers.clear();
+    game.slideStartTime = Date.now();
+    
+    if (game.currentSlide >= game.quizData.slides.length) {
+        endGame(gameCode);
+        return;
+    }
+    
+    const slide = game.quizData.slides[game.currentSlide];
+    const slideDuration = (game.quizData.slide_duration || 30) * 1000;
+    
+    // Отправляем вопрос игрокам
+    broadcastToGame(gameCode, {
+        type: 'new_question',
+        slide: {
+            question_text: slide.question_text,
+            image_path: slide.image_path,
+            options: slide.options,
+            duration: game.quizData.slide_duration,
+            font_size: slide.font_size,
+            font_color: slide.font_color
+        },
+        slideNumber: game.currentSlide + 1,
+        totalSlides: game.quizData.slides.length
+    });
+    
+    // Устанавливаем таймер на автоматическое завершение слайда
+    if (game.slideTimer) clearTimeout(game.slideTimer);
+    game.slideTimer = setTimeout(() => {
+        finishSlide(gameCode);
+    }, slideDuration);
+}
+
+// Завершение текущего слайда (подсчёт результатов)
+function finishSlide(gameCode) {
+    const game = games.get(gameCode);
+    if (!game || game.status !== 'active') return;
+    
+    if (game.slideTimer) {
+        clearTimeout(game.slideTimer);
+        game.slideTimer = null;
+    }
+    
+    const slide = game.quizData.slides[game.currentSlide];
+    const slideDurationMs = (game.quizData.slide_duration || 30) * 1000;
+    const results = [];
+    
+    // Обрабатываем ответы всех игроков
+    for (let [playerWs, player] of game.players) {
+        const answer = game.currentSlideAnswers.get(player.id);
+        let isCorrect = false;
+        let points = 0;
+        
+        if (answer) {
+            const selectedOption = slide.options[answer.optionIndex];
+            isCorrect = selectedOption && selectedOption.is_correct == 1;
+            if (isCorrect) {
+                points = calculatePoints(answer.responseTime, slideDurationMs);
+                player.score += points;
+            }
+        }
+        
+        results.push({
+            playerId: player.id,
+            playerName: player.name,
+            isCorrect: isCorrect,
+            points: points,
+            responseTime: answer ? answer.responseTime : null,
+            score: player.score
+        });
+    }
+    
+    // Сортируем по времени ответа (быстрее первыми)
+    results.sort((a, b) => (a.responseTime || Infinity) - (b.responseTime || Infinity));
+    
+    // Отправляем результаты ведущему
+    sendToHost(gameCode, {
+        type: 'slide_results',
+        slideNumber: game.currentSlide + 1,
+        results: results,
+        totalPlayers: game.players.size
+    });
+    
+    // Отправляем результаты игрокам
+    broadcastToGame(gameCode, {
+        type: 'slide_results_player',
+        results: results.map(r => ({
+            playerName: r.playerName,
+            isCorrect: r.isCorrect,
+            points: r.points,
+            score: r.score
+        }))
+    });
+    
+    // Пауза 5 секунд, затем следующий слайд или окончание
+    setTimeout(() => {
+        if (game.currentSlide + 1 < game.quizData.slides.length) {
+            // Показываем обратный отсчёт
+            broadcastToGame(gameCode, {
+                type: 'next_slide_countdown',
+                seconds: 5
+            });
+            setTimeout(() => {
+                nextSlide(gameCode);
+            }, 5000);
+        } else {
+            endGame(gameCode);
+        }
+    }, 5000);
+}
+
+// Завершение игры
+function endGame(gameCode) {
+    const game = games.get(gameCode);
+    if (!game) return;
+    
+    const finalResults = [];
+    for (let [playerWs, player] of game.players) {
+        finalResults.push({
+            name: player.name,
+            score: player.score
+        });
+    }
+    
+    finalResults.sort((a, b) => b.score - a.score);
+    
+    broadcastToGame(gameCode, {
+        type: 'game_ended',
+        results: finalResults
+    });
+    
+    // Сохраняем статистику в БД
+    if (game.quizData && game.quizData.id) {
+        const totalPlayers = game.players.size;
+        const averageScore = finalResults.reduce((sum, p) => sum + p.score, 0) / totalPlayers;
+        
+        db.query(
+            'INSERT INTO quiz_statistics (quiz_id, total_players, average_score, completed_at) VALUES (?, ?, ?, NOW())',
+            [game.quizData.id, totalPlayers, averageScore],
+            (err) => {
+                if (err) console.error('Ошибка сохранения статистики:', err);
+            }
+        );
+    }
+    
+    games.delete(gameCode);
+}
+
 // Обработка WebSocket соединений
 wss.on('connection', (ws, req) => {
-    const params = url.parse(req.url, true).query;
-    const role = params.role; // 'host' или 'player'
-    const gameCode = params.code;
-    const playerName = params.name;
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const role = url.searchParams.get('role');
+    const gameCode = url.searchParams.get('code');
+    const playerName = url.searchParams.get('name');
     
     console.log(`Новое подключение: role=${role}, code=${gameCode}, name=${playerName}`);
     
     if (role === 'host') {
         // Создание новой игры
-        const newGameCode = gameCode || generateGameCode();
+        const newGameCode = generateGameCode();
         
         games.set(newGameCode, {
             code: newGameCode,
@@ -78,8 +239,8 @@ wss.on('connection', (ws, req) => {
             currentSlide: -1,
             slideStartTime: null,
             status: 'waiting', // waiting, active, finished
-            playersAnswers: new Map(),
-            currentSlideAnswers: new Map()
+            currentSlideAnswers: new Map(),
+            slideTimer: null
         });
         
         ws.send(JSON.stringify({
@@ -214,6 +375,7 @@ function handleHostMessage(ws, gameCode, message) {
             game.status = 'active';
             game.quizData = message.quizData;
             game.currentSlide = -1;
+            game.currentSlideAnswers.clear();
             
             // Уведомляем всех игроков о начале игры
             broadcastToGame(gameCode, {
@@ -228,174 +390,16 @@ function handleHostMessage(ws, gameCode, message) {
             }, 3000);
             break;
             
-        case 'next_slide':
-            nextSlide(gameCode);
-            break;
-            
         case 'stop_answers':
-            stopCurrentSlide(gameCode);
+            if (game.status === 'active' && game.slideTimer) {
+                finishSlide(gameCode);
+            }
             break;
             
         case 'end_game':
             endGame(gameCode);
             break;
     }
-}
-
-// Переход к следующему слайду
-function nextSlide(gameCode) {
-    const game = games.get(gameCode);
-    if (!game || game.status !== 'active') return;
-    
-    game.currentSlide++;
-    game.currentSlideAnswers.clear();
-    game.slideStartTime = Date.now();
-    
-    if (game.currentSlide >= game.quizData.slides.length) {
-        endGame(gameCode);
-        return;
-    }
-    
-    const slide = game.quizData.slides[game.currentSlide];
-    const slideDuration = game.quizData.slide_duration || 30;
-    
-    // Отправляем вопрос игрокам
-    broadcastToGame(gameCode, {
-        type: 'new_question',
-        slide: {
-            question_text: slide.question_text,
-            image_path: slide.image_path,
-            options: slide.options,
-            duration: slideDuration,
-            font_size: slide.font_size,
-            font_color: slide.font_color
-        },
-        slideNumber: game.currentSlide + 1,
-        totalSlides: game.quizData.slides.length
-    });
-    
-    // Устанавливаем таймер для автоматического завершения слайда
-    if (game.slideTimer) clearTimeout(game.slideTimer);
-    game.slideTimer = setTimeout(() => {
-        stopCurrentSlide(gameCode);
-    }, slideDuration * 1000);
-}
-
-// Остановка текущего слайда и показ статистики
-function stopCurrentSlide(gameCode) {
-    const game = games.get(gameCode);
-    if (!game || game.status !== 'active') return;
-    
-    if (game.slideTimer) {
-        clearTimeout(game.slideTimer);
-        game.slideTimer = null;
-    }
-    
-    const slide = game.quizData.slides[game.currentSlide];
-    const results = [];
-    
-    // Обрабатываем ответы игроков
-    for (let [playerWs, player] of game.players) {
-        const answer = game.currentSlideAnswers.get(player.id);
-        let isCorrect = false;
-        let earnedPoints = 0;
-        
-        if (answer) {
-            const selectedOption = slide.options[answer.optionIndex];
-            isCorrect = selectedOption && selectedOption.is_correct == 1;
-            
-            if (isCorrect) {
-                // Бонус за скорость ответа
-                const timeBonus = Math.max(0, 1 - (answer.responseTime / (game.quizData.slide_duration * 1000)));
-                earnedPoints = Math.floor(10 + timeBonus * 10);
-                player.score += earnedPoints;
-            }
-        }
-        
-        results.push({
-            playerId: player.id,
-            playerName: player.name,
-            answer: answer ? answer.optionIndex : -1,
-            isCorrect: isCorrect,
-            points: earnedPoints,
-            responseTime: answer ? answer.responseTime : null,
-            score: player.score
-        });
-    }
-    
-    // Сортируем по времени ответа
-    results.sort((a, b) => (a.responseTime || Infinity) - (b.responseTime || Infinity));
-    
-    // Отправляем результаты ведущему
-    sendToHost(gameCode, {
-        type: 'slide_results',
-        slideNumber: game.currentSlide + 1,
-        results: results,
-        totalPlayers: game.players.size
-    });
-    
-    // Отправляем результаты игрокам
-    broadcastToGame(gameCode, {
-        type: 'slide_results_player',
-        results: results.map(r => ({
-            playerName: r.playerName,
-            isCorrect: r.isCorrect,
-            points: r.points,
-            score: r.score
-        }))
-    });
-    
-    // Ждем 5 секунд и показываем следующий слайд
-    setTimeout(() => {
-        if (game.currentSlide + 1 < game.quizData.slides.length) {
-            broadcastToGame(gameCode, {
-                type: 'next_slide_countdown',
-                seconds: 5
-            });
-            setTimeout(() => {
-                nextSlide(gameCode);
-            }, 5000);
-        } else {
-            endGame(gameCode);
-        }
-    }, 5000);
-}
-
-// Завершение игры
-function endGame(gameCode) {
-    const game = games.get(gameCode);
-    if (!game) return;
-    
-    const finalResults = [];
-    for (let [playerWs, player] of game.players) {
-        finalResults.push({
-            name: player.name,
-            score: player.score
-        });
-    }
-    
-    finalResults.sort((a, b) => b.score - a.score);
-    
-    broadcastToGame(gameCode, {
-        type: 'game_ended',
-        results: finalResults
-    });
-    
-    // Сохраняем статистику в БД
-    if (game.quizData && game.quizData.id) {
-        const totalPlayers = game.players.size;
-        const averageScore = finalResults.reduce((sum, p) => sum + p.score, 0) / totalPlayers;
-        
-        db.query(
-            'INSERT INTO quiz_statistics (quiz_id, total_players, average_score, completed_at) VALUES (?, ?, ?, NOW())',
-            [game.quizData.id, totalPlayers, averageScore],
-            (err) => {
-                if (err) console.error('Ошибка сохранения статистики:', err);
-            }
-        );
-    }
-    
-    games.delete(gameCode);
 }
 
 // Обработка сообщений от игроков
@@ -418,10 +422,9 @@ function handlePlayerMessage(ws, gameCode, message) {
             }
             
             const responseTime = Date.now() - game.slideStartTime;
-            const slide = game.quizData.slides[game.currentSlide];
+            const slideDuration = (game.quizData.slide_duration || 30) * 1000;
             
             // Проверяем, не истекло ли время
-            const slideDuration = (game.quizData.slide_duration || 30) * 1000;
             if (responseTime > slideDuration) {
                 ws.send(JSON.stringify({
                     type: 'error',

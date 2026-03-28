@@ -44,12 +44,35 @@ if (!$gameCode || !$playerName) {
             color: white;
             padding: 20px;
             text-align: center;
+            position: relative;
         }
 
         .game-code {
             font-size: 14px;
             opacity: 0.9;
             margin-top: 5px;
+        }
+
+        .score {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0,0,0,0.5);
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 16px;
+            font-weight: bold;
+        }
+
+        .timer {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: rgba(0,0,0,0.5);
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 18px;
+            font-weight: bold;
         }
 
         .game-content {
@@ -179,29 +202,6 @@ if (!$gameCode || !$playerName) {
             margin: 20px 0;
         }
 
-        .timer {
-            position: fixed;
-            top: 20px;
-            right: 20px;
-            background: rgba(0,0,0,0.7);
-            color: white;
-            padding: 10px 20px;
-            border-radius: 50px;
-            font-size: 24px;
-            font-weight: bold;
-        }
-
-        .score {
-            position: fixed;
-            top: 20px;
-            left: 20px;
-            background: rgba(0,0,0,0.7);
-            color: white;
-            padding: 10px 20px;
-            border-radius: 50px;
-            font-size: 18px;
-        }
-
         @media (max-width: 768px) {
             .options-grid {
                 grid-template-columns: 1fr;
@@ -223,7 +223,7 @@ if (!$gameCode || !$playerName) {
             <h1>🎮 Quiz26</h1>
             <div class="game-code">Код игры: <?php echo htmlspecialchars($gameCode); ?></div>
             <div class="score" id="score">Счёт: 0</div>
-            <div class="timer" id="timer" style="display: none;">⏱️ 30</div>
+            <div class="timer" id="timer" style="display: none;">⏱️ --</div>
         </div>
         
         <div class="game-content" id="gameContent">
@@ -406,6 +406,8 @@ if (!$gameCode || !$playerName) {
             
             if (timerInterval) clearInterval(timerInterval);
             
+            timerElement.textContent = `⏱️ ${timeLeft}`;
+            
             timerInterval = setInterval(() => {
                 timeLeft--;
                 timerElement.textContent = `⏱️ ${timeLeft}`;
@@ -487,6 +489,11 @@ if (!$gameCode || !$playerName) {
                 `;
                 resultsList.appendChild(resultDiv);
             });
+            
+            const myFinal = results.find(r => r.name === playerName);
+            if (myFinal) {
+                document.getElementById('score').textContent = `Счёт: ${myFinal.score}`;
+            }
         }
         
         function escapeHtml(text) {

@@ -43,7 +43,6 @@ if ($quiz_id) {
     }
 }
 
-// Проверяем наличие слайдов
 if (!$quiz || empty($slides)) {
     header('Location: dashboard.php?msg=' . urlencode('Викторина не найдена или не содержит вопросов'));
     exit();
@@ -276,8 +275,8 @@ if (!$quiz || empty($slides)) {
         <div class="game-controls">
             <div class="status" id="gameStatus">Ожидание подключения игроков</div>
             <button class="btn btn-primary" id="startGameBtn" onclick="startGame()" disabled>🚀 Начать игру</button>
-            <button class="btn btn-danger" id="endGameBtn" onclick="endGame()" disabled>⏹️ Завершить игру</button>
             <button class="btn btn-warning" id="stopAnswersBtn" onclick="stopAnswers()" style="display: none;">⏸️ Завершить приём ответов</button>
+            <button class="btn btn-danger" id="endGameBtn" onclick="endGame()" disabled>⏹️ Завершить игру</button>
         </div>
         
         <div class="current-question" id="currentQuestionPanel">
@@ -300,6 +299,7 @@ if (!$quiz || empty($slides)) {
         const quizId = <?php echo $quiz_id; ?>;
         const quizTitle = <?php echo json_encode($quiz['title']); ?>;
         const slides = <?php echo json_encode($slides); ?>;
+        const slideDuration = <?php echo $quiz['slide_duration'] ?? 30; ?>;
         
         // Подключение к WebSocket
         function connect() {
@@ -363,6 +363,7 @@ if (!$quiz || empty($slides)) {
                 case 'new_question':
                     showCurrentQuestion(data);
                     document.getElementById('stopAnswersBtn').style.display = 'inline-block';
+                    document.getElementById('currentQuestionPanel').style.display = 'block';
                     break;
                     
                 case 'slide_results':
@@ -376,6 +377,7 @@ if (!$quiz || empty($slides)) {
                     document.getElementById('gameStatus').textContent = 'Игра завершена';
                     document.getElementById('gameStatus').className = 'status status-finished';
                     document.getElementById('endGameBtn').disabled = true;
+                    document.getElementById('stopAnswersBtn').style.display = 'none';
                     break;
             }
         }
@@ -410,9 +412,7 @@ if (!$quiz || empty($slides)) {
         
         // Показ текущего вопроса
         function showCurrentQuestion(data) {
-            const panel = document.getElementById('currentQuestionPanel');
             const questionText = document.getElementById('questionText');
-            panel.style.display = 'block';
             questionText.innerHTML = data.slide.question_text;
             questionText.style.fontSize = (data.slide.font_size || 24) + 'px';
             questionText.style.color = data.slide.font_color || '#000000';
@@ -478,7 +478,7 @@ if (!$quiz || empty($slides)) {
                 id: quizId,
                 title: quizTitle,
                 slides: slides,
-                slide_duration: <?php echo $quiz['slide_duration'] ?? 30; ?>
+                slide_duration: slideDuration
             };
             
             ws.send(JSON.stringify({

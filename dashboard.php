@@ -11,11 +11,41 @@ if (!isset($_SESSION['user_id'])) {
 $username = $_SESSION['username'];
 $user_id = $_SESSION['user_id'];
 
+// Обработка удаления викторины
+if (isset($_GET['action']) && isset($_GET['quiz_id'])) {
+    $action = $_GET['action'];
+    $quiz_id = intval($_GET['quiz_id']);
+    
+    if ($action === 'delete') {
+        // Получаем пути к изображениям для удаления
+        $stmt = $conn->prepare("SELECT image_path FROM slides WHERE quiz_id = ?");
+        $stmt->bind_param("i", $quiz_id);
+        $stmt->execute();
+        $result = $stmt->get_result();
+        while ($row = $result->fetch_assoc()) {
+            if ($row['image_path'] && file_exists('uploads/' . $row['image_path'])) {
+                unlink('uploads/' . $row['image_path']);
+            }
+        }
+        $stmt->close();
+        
+        // Удаляем викторину (каскадное удаление слайдов и ответов)
+        $stmt = $conn->prepare("DELETE FROM quizzes WHERE id = ? AND user_id = ?");
+        $stmt->bind_param("ii", $quiz_id, $user_id);
+        $stmt->execute();
+        $stmt->close();
+        
+        header('Location: dashboard.php');
+        exit();
+    }
+}
+
 // Получение статистики для дашборда
 $stats = [
     'total_quizzes' => 0,
     'public_quizzes' => 0,
-    'total_games' => 0
+    'total_games' => 0,
+    'total_players' => 0
 ];
 
 $stmt = $conn->prepare("SELECT COUNT(*) as count FROM quizzes WHERE user_id = ?");
@@ -32,31 +62,13 @@ $result = $stmt->get_result();
 $stats['public_quizzes'] = $result->fetch_assoc()['count'];
 $stmt->close();
 
-// Получение последних викторин
-$recent_quizzes = [];
-$stmt = $conn->prepare("SELECT id, title, is_public, created_at FROM quizzes WHERE user_id = ? ORDER BY created_at DESC LIMIT 5");
+// Получаем количество проведенных игр
+$stmt = $conn->prepare("SELECT COUNT(*) as count FROM quiz_statistics WHERE quiz_id IN (SELECT id FROM quizzes WHERE user_id = ?)");
 $stmt->bind_param("i", $user_id);
 $stmt->execute();
 $result = $stmt->get_result();
-while ($row = $result->fetch_assoc()) {
-    $recent_quizzes[] = $row;
-}
+$stats['total_games'] = $result->fetch_assoc()['count'];
 $stmt->close();
-
-// В начале dashboard.php добавьте обработку действий
-if (isset($_GET['action']) && isset($_GET['quiz_id'])) {
-    $action = $_GET['action'];
-    $quiz_id = intval($_GET['quiz_id']);
-
-    if ($action === 'delete') {
-        $stmt = $conn->prepare("DELETE FROM quizzes WHERE id = ? AND user_id = ?");
-        $stmt->bind_param("ii", $quiz_id, $user_id);
-        $stmt->execute();
-        $stmt->close();
-        header('Location: dashboard.php?module=quizzes');
-        exit();
-    }
-}
 
 // Получение всех викторин пользователя
 $all_quizzes = [];
@@ -71,7 +83,6 @@ $stmt->close();
 ?>
 <!DOCTYPE html>
 <html lang="ru">
-
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -94,7 +105,7 @@ $stmt->close();
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
             padding: 20px 30px;
-            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
         }
 
         .header-content {
@@ -126,7 +137,7 @@ $stmt->close();
         }
 
         .logout-btn {
-            background: rgba(255, 255, 255, 0.2);
+            background: rgba(255,255,255,0.2);
             padding: 8px 20px;
             border-radius: 20px;
             text-decoration: none;
@@ -135,7 +146,7 @@ $stmt->close();
         }
 
         .logout-btn:hover {
-            background: rgba(255, 255, 255, 0.3);
+            background: rgba(255,255,255,0.3);
         }
 
         /* Основной контейнер */
@@ -157,13 +168,13 @@ $stmt->close();
             background: white;
             border-radius: 15px;
             padding: 25px;
-            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
             transition: transform 0.3s, box-shadow 0.3s;
         }
 
         .stat-card:hover {
             transform: translateY(-5px);
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
         }
 
         .stat-icon {
@@ -214,7 +225,7 @@ $stmt->close();
 
         .module-card:hover {
             transform: translateY(-5px);
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
             border-color: #667eea;
         }
 
@@ -241,7 +252,7 @@ $stmt->close();
             background: white;
             border-radius: 15px;
             padding: 25px;
-            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
         }
 
         .quizzes-header {
@@ -263,6 +274,8 @@ $stmt->close();
             font-size: 14px;
             font-weight: 500;
             transition: transform 0.2s;
+            text-decoration: none;
+            display: inline-block;
         }
 
         .btn-create:hover {
@@ -278,8 +291,7 @@ $stmt->close();
             border-collapse: collapse;
         }
 
-        th,
-        td {
+        th, td {
             padding: 12px;
             text-align: left;
             border-bottom: 1px solid #e0e0e0;
@@ -293,16 +305,19 @@ $stmt->close();
 
         .quiz-actions {
             display: flex;
-            gap: 10px;
+            gap: 8px;
+            flex-wrap: wrap;
         }
 
-        .quiz-actions button {
-            padding: 5px 12px;
+        .quiz-actions a, .quiz-actions button {
+            padding: 6px 12px;
             border: none;
             border-radius: 5px;
             cursor: pointer;
             font-size: 12px;
             transition: all 0.2s;
+            text-decoration: none;
+            display: inline-block;
         }
 
         .btn-edit {
@@ -318,6 +333,16 @@ $stmt->close();
         .btn-delete {
             background: #e74c3c;
             color: white;
+        }
+
+        .btn-stats {
+            background: #9b59b6;
+            color: white;
+        }
+
+        .btn-edit:hover, .btn-play:hover, .btn-delete:hover, .btn-stats:hover {
+            transform: translateY(-2px);
+            filter: brightness(1.1);
         }
 
         .status-badge {
@@ -344,24 +369,61 @@ $stmt->close();
             color: #999;
         }
 
+        .alert {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 12px 20px;
+            border-radius: 8px;
+            color: white;
+            z-index: 1000;
+            animation: slideIn 0.3s ease-out;
+        }
+
+        .alert-success {
+            background: #2ecc71;
+        }
+
+        .alert-error {
+            background: #e74c3c;
+        }
+
+        @keyframes slideIn {
+            from {
+                transform: translateX(100%);
+                opacity: 0;
+            }
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
+
         @media (max-width: 768px) {
             .container {
                 padding: 0 15px;
             }
-
+            
             .header-content {
                 flex-direction: column;
                 gap: 15px;
                 text-align: center;
             }
-
+            
             .modules-grid {
                 grid-template-columns: 1fr;
+            }
+            
+            .quiz-actions {
+                flex-direction: column;
+            }
+            
+            .quiz-actions a, .quiz-actions button {
+                text-align: center;
             }
         }
     </style>
 </head>
-
 <body>
     <div class="header">
         <div class="header-content">
@@ -395,9 +457,9 @@ $stmt->close();
                 <div class="stat-label">Проведено игр</div>
             </div>
             <div class="stat-card">
-                <div class="stat-icon">⭐</div>
-                <div class="stat-value">0</div>
-                <div class="stat-label">Рейтинг</div>
+                <div class="stat-icon">👥</div>
+                <div class="stat-value"><?php echo $stats['total_players']; ?></div>
+                <div class="stat-label">Всего игроков</div>
             </div>
         </div>
 
@@ -405,45 +467,39 @@ $stmt->close();
         <div class="modules-section">
             <h2 class="section-title">📱 Модули приложения</h2>
             <div class="modules-grid">
-                <a href="#" class="module-card" onclick="showPlaceholder('Управление категориями')">
-                    <div class="module-icon">🏷️</div>
-                    <div class="module-title">Категории</div>
-                    <div class="module-description">Создание и управление категориями викторин с цветовой маркировкой</div>
-                </a>
-
-                <a href="#" class="module-card" onclick="showPlaceholder('Редактор викторин')">
-                    <div class="module-icon">✏️</div>
-                    <div class="module-title">Редактор</div>
-                    <div class="module-description">Создание и редактирование слайдов, вопросов и ответов</div>
-                </a>
-
-                <a href="#" class="module-card" onclick="showPlaceholder('Проведение игры')">
-                    <div class="module-icon">🎮</div>
-                    <div class="module-title">Игра</div>
-                    <div class="module-description">Запуск викторины и управление игровой сессией</div>
-                </a>
-
-                <a href="#" class="module-card" onclick="showPlaceholder('Статистика')">
-                    <div class="module-icon">📊</div>
-                    <div class="module-title">Статистика</div>
-                    <div class="module-description">Анализ проведенных викторин и результатов игроков</div>
-                </a>
-
                 <a href="create_quiz.php" class="module-card">
                     <div class="module-icon">✨</div>
                     <div class="module-title">Создать викторину</div>
                     <div class="module-description">Создайте новую викторину с нуля</div>
                 </a>
+                
+                <a href="#" class="module-card" onclick="showPlaceholder('Управление категориями')">
+                    <div class="module-icon">🏷️</div>
+                    <div class="module-title">Категории</div>
+                    <div class="module-description">Создание и управление категориями викторин с цветовой маркировкой</div>
+                </a>
+                
+                <a href="#" class="module-card" onclick="showPlaceholder('Статистика')">
+                    <div class="module-icon">📊</div>
+                    <div class="module-title">Статистика</div>
+                    <div class="module-description">Анализ проведенных викторин и результатов игроков</div>
+                </a>
+                
+                <a href="#" class="module-card" onclick="showPlaceholder('Настройки')">
+                    <div class="module-icon">⚙️</div>
+                    <div class="module-title">Настройки</div>
+                    <div class="module-description">Настройки приложения и фоновой музыки</div>
+                </a>
             </div>
         </div>
 
-        <!-- Полный список викторин -->
+        <!-- Мои викторины -->
         <div class="quizzes-section">
             <div class="quizzes-header">
-                <h2 class="section-title" style="margin-bottom: 0;">📋 Все мои викторины</h2>
+                <h2 class="section-title" style="margin-bottom: 0;">📋 Мои викторины</h2>
                 <a href="create_quiz.php" class="btn-create">+ Создать викторину</a>
             </div>
-
+            
             <div class="quizzes-table">
                 <?php if (empty($all_quizzes)): ?>
                     <div class="empty-state">
@@ -455,7 +511,7 @@ $stmt->close();
                         <thead>
                             <tr>
                                 <th>Название</th>
-                                <th>Категория</th>
+                                <th>Описание</th>
                                 <th>Доступ</th>
                                 <th>Слайдов</th>
                                 <th>Дата создания</th>
@@ -463,7 +519,7 @@ $stmt->close();
                             </tr>
                         </thead>
                         <tbody>
-                            <?php foreach ($all_quizzes as $quiz):
+                            <?php foreach ($all_quizzes as $quiz): 
                                 // Получаем количество слайдов
                                 $count_stmt = $conn->prepare("SELECT COUNT(*) as count FROM slides WHERE quiz_id = ?");
                                 $count_stmt->bind_param("i", $quiz['id']);
@@ -472,22 +528,24 @@ $stmt->close();
                                 $slide_count = $count_result->fetch_assoc()['count'];
                                 $count_stmt->close();
                             ?>
-                                <tr>
-                                    <td><?php echo htmlspecialchars($quiz['title']); ?></td>
-                                    <td><?php echo $quiz['category_id'] ? 'Категория ' . $quiz['category_id'] : '—'; ?></td>
-                                    <td>
-                                        <span class="status-badge <?php echo $quiz['is_public'] ? 'status-public' : 'status-private'; ?>">
-                                            <?php echo $quiz['is_public'] ? '🌍 Публичная' : '🔒 Личная'; ?>
-                                        </span>
-                                    </td>
-                                    <td><?php echo $slide_count; ?></td>
-                                    <td><?php echo date('d.m.Y', strtotime($quiz['created_at'])); ?></td>
-                                    <td class="quiz-actions">
-                                        <a href="quiz_editor.php?id=<?php echo $quiz['id']; ?>&mode=edit" class="btn-edit" style="text-decoration: none; display: inline-block;">✏️ Редакт.</a>
-                                        <a href="quiz_editor.php?id=<?php echo $quiz['id']; ?>&mode=preview" class="btn-play" style="text-decoration: none; display: inline-block;">👁️ Просмотр</a>
-                                        <a href="?action=delete&quiz_id=<?php echo $quiz['id']; ?>" class="btn-delete" style="text-decoration: none; display: inline-block;" onclick="return confirm('Удалить викторину?')">🗑️ Удалить</a>
-                                    </td>
-                                </tr>
+                            <tr>
+                                <td><strong><?php echo htmlspecialchars($quiz['title']); ?></strong></td>
+                                <td style="max-width: 200px; overflow: hidden; text-overflow: ellipsis;">
+                                    <?php echo htmlspecialchars(mb_substr($quiz['description'] ?? '', 0, 50)); ?>
+                                </td>
+                                <td>
+                                    <span class="status-badge <?php echo $quiz['is_public'] ? 'status-public' : 'status-private'; ?>">
+                                        <?php echo $quiz['is_public'] ? '🌍 Публичная' : '🔒 Личная'; ?>
+                                    </span>
+                                </td>
+                                <td><?php echo $slide_count; ?></td>
+                                <td><?php echo date('d.m.Y', strtotime($quiz['created_at'])); ?></td>
+                                <td class="quiz-actions">
+                                    <a href="quiz_editor.php?id=<?php echo $quiz['id']; ?>&mode=edit" class="btn-edit">✏️ Редакт.</a>
+                                    <a href="game_host.php?quiz_id=<?php echo $quiz['id']; ?>" class="btn-play" target="_blank">🎮 Играть</a>
+                                    <a href="?action=delete&quiz_id=<?php echo $quiz['id']; ?>" class="btn-delete" onclick="return confirmDelete('<?php echo htmlspecialchars($quiz['title']); ?>')">🗑️ Удалить</a>
+                                </td>
+                            </tr>
                             <?php endforeach; ?>
                         </tbody>
                     </table>
@@ -500,24 +558,35 @@ $stmt->close();
         function showPlaceholder(moduleName) {
             alert(`Модуль "${moduleName}" будет доступен в следующей версии приложения.\n\nДанная функция находится в разработке.`);
         }
-
+        
+        function confirmDelete(quizTitle) {
+            return confirm(`Вы уверены, что хотите удалить викторину "${quizTitle}"?\n\nЭто действие нельзя отменить.`);
+        }
+        
+        // Показ уведомления (если есть GET параметр)
+        <?php if (isset($_GET['msg'])): ?>
+            showNotification('<?php echo htmlspecialchars($_GET['msg']); ?>', 'success');
+        <?php endif; ?>
+        
+        function showNotification(message, type) {
+            const notification = document.createElement('div');
+            notification.className = `alert alert-${type}`;
+            notification.textContent = message;
+            document.body.appendChild(notification);
+            
+            setTimeout(() => {
+                notification.remove();
+            }, 3000);
+        }
+        
         // Добавляем эффекты при наведении
         document.querySelectorAll('.module-card').forEach(card => {
             card.addEventListener('click', function(e) {
-                e.preventDefault();
-            });
-        });
-
-        // Подтверждение удаления
-        document.querySelectorAll('.btn-delete').forEach(btn => {
-            btn.addEventListener('click', function(e) {
-                e.stopPropagation();
-                if (confirm('Вы уверены, что хотите удалить эту викторину? Это действие нельзя отменить.')) {
-                    showPlaceholder('Удаление викторины');
+                if (this.getAttribute('onclick')) {
+                    e.preventDefault();
                 }
             });
         });
     </script>
 </body>
-
 </html>

@@ -1,0 +1,17 @@
+{
+  "name": "quiz26-game-server",
+  "version": "1.0.0",
+  "description": "WebSocket server for Quiz26 game",
+  "main": "game_server.js",
+  "scripts": {
+    "start": "node game_server.js",
+    "dev": "nodemon game_server.js"
+  },
+  "dependencies": {
+    "ws": "^8.14.2",
+    "mysql2": "^3.6.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}

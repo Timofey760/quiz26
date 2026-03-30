@@ -7,6 +7,7 @@ if (!$gameCode || !$playerName) {
     exit();
 }
 ?>
+
 <!DOCTYPE html>
 <html lang="ru">
 <head>

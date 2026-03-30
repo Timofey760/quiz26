@@ -1,8 +1,9 @@
 const WebSocket = require('ws');
 const http = require('http');
+const url = require('url');
 const mysql = require('mysql2');
 
-// Конфигурация базы данных
+// Конфигурация БД (опционально, для статистики)
 const db = mysql.createConnection({
     host: 'localhost',
     user: 'root',
@@ -10,445 +11,361 @@ const db = mysql.createConnection({
     database: 'quiz26'
 });
 
-db.connect((err) => {
-    if (err) {
-        console.error('Ошибка подключения к БД:', err);
-        process.exit(1);
-    }
-    console.log('Подключено к MySQL');
+db.connect(err => {
+    if (err) console.error('DB connection error:', err);
+    else console.log('Connected to MySQL');
 });
 
 const server = http.createServer();
 const wss = new WebSocket.Server({ server });
 
-// Хранилище активных игр
+// Хранилище активных игр: gameCode -> объект игры
 const games = new Map();
 
-// Функция генерации случайного кода
+// Генерация случайного 4-буквенного кода
 function generateGameCode() {
     const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-    let code = '';
-    for (let i = 0; i < 4; i++) {
-        code += letters[Math.floor(Math.random() * letters.length)];
-    }
+    let code;
+    do {
+        code = '';
+        for (let i = 0; i < 4; i++) {
+            code += letters[Math.floor(Math.random() * letters.length)];
+        }
+    } while (games.has(code));
     return code;
 }
 
-// Функция отправки сообщения всем игрокам в игре
-function broadcastToGame(gameCode, message, excludeClient = null) {
-    const game = games.get(gameCode);
-    if (!game) return;
-    
-    game.players.forEach((player, client) => {
+// Отправка сообщения всем игрокам (и ведущему, если нужно)
+function broadcastToGame(game, message, excludeClient = null) {
+    if (game.host && game.host !== excludeClient && game.host.readyState === WebSocket.OPEN) {
+        game.host.send(JSON.stringify(message));
+    }
+    for (let [client, player] of game.players) {
         if (client !== excludeClient && client.readyState === WebSocket.OPEN) {
             client.send(JSON.stringify(message));
         }
-    });
+    }
 }
 
-// Функция отправки сообщения ведущему
-function sendToHost(gameCode, message) {
-    const game = games.get(gameCode);
-    if (game && game.host && game.host.readyState === WebSocket.OPEN) {
+// Отправка только ведущему
+function sendToHost(game, message) {
+    if (game.host && game.host.readyState === WebSocket.OPEN) {
         game.host.send(JSON.stringify(message));
     }
 }
 
-// Расчёт очков за правильный ответ в зависимости от скорости
-function calculatePoints(responseTime, slideDurationMs) {
-    const maxPoints = 1000;
-    const minPoints = 100;
-    // responseTime в миллисекундах, slideDurationMs в миллисекундах
-    const ratio = Math.max(0, Math.min(1, 1 - (responseTime / slideDurationMs)));
-    return Math.floor(minPoints + (maxPoints - minPoints) * ratio);
+// Остановка таймера слайда
+function stopSlideTimer(game) {
+    if (game.slideTimer) {
+        clearTimeout(game.slideTimer);
+        game.slideTimer = null;
+    }
+}
+
+// Завершение текущего слайда и показ результатов
+function finishSlide(game) {
+    if (game.state !== 'active' || game.currentSlide < 0) return;
+
+    stopSlideTimer(game);
+
+    const slide = game.quizData.slides[game.currentSlide];
+    const results = [];
+    const playersArray = Array.from(game.players.values());
+
+    // Собираем ответы
+    for (let player of playersArray) {
+        const answer = game.answers.get(player.id);
+        let isCorrect = false;
+        let points = 0;
+        if (answer) {
+            const selectedOption = slide.options[answer.optionIndex];
+            isCorrect = selectedOption && selectedOption.is_correct == 1;
+            if (isCorrect) {
+                // Бонус за скорость: max 10 очков, скорость в процентах от времени
+                const maxPoints = 10;
+                const timePercent = 1 - (answer.responseTime / (game.quizData.slide_duration * 1000));
+                points = Math.floor(maxPoints * Math.max(0, timePercent));
+                player.score += points;
+            }
+        }
+        results.push({
+            playerId: player.id,
+            playerName: player.name,
+            isCorrect: isCorrect,
+            points: points,
+            score: player.score,
+            responseTime: answer ? answer.responseTime : null
+        });
+    }
+
+    // Сортируем по времени ответа (быстрее – выше)
+    results.sort((a, b) => (a.responseTime || Infinity) - (b.responseTime || Infinity));
+
+    // Отправляем результаты ведущему и игрокам
+    broadcastToGame(game, {
+        type: 'slide_results',
+        slideNumber: game.currentSlide + 1,
+        results: results,
+        totalPlayers: playersArray.length
+    });
+
+    // Переходим к следующему слайду или завершаем игру
+    if (game.currentSlide + 1 < game.quizData.slides.length) {
+        // Пауза 5 секунд, затем следующий слайд
+        setTimeout(() => {
+            if (game.state === 'active') {
+                nextSlide(game);
+            }
+        }, 5000);
+    } else {
+        endGame(game);
+    }
 }
 
 // Переход к следующему слайду
-function nextSlide(gameCode) {
-    const game = games.get(gameCode);
-    if (!game || game.status !== 'active') return;
-    
+function nextSlide(game) {
+    if (game.state !== 'active') return;
+
     game.currentSlide++;
-    // Очищаем ответы для нового слайда
-    game.currentSlideAnswers.clear();
-    game.slideStartTime = Date.now();
-    
     if (game.currentSlide >= game.quizData.slides.length) {
-        endGame(gameCode);
+        endGame(game);
         return;
     }
-    
+
     const slide = game.quizData.slides[game.currentSlide];
-    const slideDuration = (game.quizData.slide_duration || 30) * 1000;
-    
-    // Отправляем вопрос игрокам
-    broadcastToGame(gameCode, {
+    const duration = game.quizData.slide_duration || 30;
+
+    // Очищаем ответы на новый слайд
+    game.answers.clear();
+
+    // Отправляем вопрос всем
+    broadcastToGame(game, {
         type: 'new_question',
         slide: {
             question_text: slide.question_text,
             image_path: slide.image_path,
             options: slide.options,
-            duration: game.quizData.slide_duration,
+            duration: duration,
             font_size: slide.font_size,
             font_color: slide.font_color
         },
         slideNumber: game.currentSlide + 1,
         totalSlides: game.quizData.slides.length
     });
-    
-    // Устанавливаем таймер на автоматическое завершение слайда
-    if (game.slideTimer) clearTimeout(game.slideTimer);
-    game.slideTimer = setTimeout(() => {
-        finishSlide(gameCode);
-    }, slideDuration);
-}
 
-// Завершение текущего слайда (подсчёт результатов)
-function finishSlide(gameCode) {
-    const game = games.get(gameCode);
-    if (!game || game.status !== 'active') return;
-    
-    if (game.slideTimer) {
-        clearTimeout(game.slideTimer);
-        game.slideTimer = null;
-    }
-    
-    const slide = game.quizData.slides[game.currentSlide];
-    const slideDurationMs = (game.quizData.slide_duration || 30) * 1000;
-    const results = [];
-    
-    // Обрабатываем ответы всех игроков
-    for (let [playerWs, player] of game.players) {
-        const answer = game.currentSlideAnswers.get(player.id);
-        let isCorrect = false;
-        let points = 0;
-        
-        if (answer) {
-            const selectedOption = slide.options[answer.optionIndex];
-            isCorrect = selectedOption && selectedOption.is_correct == 1;
-            if (isCorrect) {
-                points = calculatePoints(answer.responseTime, slideDurationMs);
-                player.score += points;
-            }
-        }
-        
-        results.push({
-            playerId: player.id,
-            playerName: player.name,
-            isCorrect: isCorrect,
-            points: points,
-            responseTime: answer ? answer.responseTime : null,
-            score: player.score
-        });
-    }
-    
-    // Сортируем по времени ответа (быстрее первыми)
-    results.sort((a, b) => (a.responseTime || Infinity) - (b.responseTime || Infinity));
-    
-    // Отправляем результаты ведущему
-    sendToHost(gameCode, {
-        type: 'slide_results',
-        slideNumber: game.currentSlide + 1,
-        results: results,
-        totalPlayers: game.players.size
-    });
-    
-    // Отправляем результаты игрокам
-    broadcastToGame(gameCode, {
-        type: 'slide_results_player',
-        results: results.map(r => ({
-            playerName: r.playerName,
-            isCorrect: r.isCorrect,
-            points: r.points,
-            score: r.score
-        }))
-    });
-    
-    // Пауза 5 секунд, затем следующий слайд или окончание
-    setTimeout(() => {
-        if (game.currentSlide + 1 < game.quizData.slides.length) {
-            // Показываем обратный отсчёт
-            broadcastToGame(gameCode, {
-                type: 'next_slide_countdown',
-                seconds: 5
-            });
-            setTimeout(() => {
-                nextSlide(gameCode);
-            }, 5000);
-        } else {
-            endGame(gameCode);
-        }
-    }, 5000);
+    // Запускаем таймер
+    stopSlideTimer(game);
+    game.slideTimer = setTimeout(() => {
+        finishSlide(game);
+    }, duration * 1000);
 }
 
 // Завершение игры
-function endGame(gameCode) {
-    const game = games.get(gameCode);
-    if (!game) return;
-    
-    const finalResults = [];
-    for (let [playerWs, player] of game.players) {
-        finalResults.push({
-            name: player.name,
-            score: player.score
-        });
-    }
-    
-    finalResults.sort((a, b) => b.score - a.score);
-    
-    broadcastToGame(gameCode, {
+function endGame(game) {
+    if (game.state === 'finished') return;
+    game.state = 'finished';
+    stopSlideTimer(game);
+
+    // Подсчет финальных результатов
+    const finalResults = Array.from(game.players.values())
+        .map(p => ({ name: p.name, score: p.score }))
+        .sort((a, b) => b.score - a.score);
+
+    broadcastToGame(game, {
         type: 'game_ended',
         results: finalResults
     });
-    
-    // Сохраняем статистику в БД
+
+    // Сохранение статистики в БД (опционально)
     if (game.quizData && game.quizData.id) {
         const totalPlayers = game.players.size;
         const averageScore = finalResults.reduce((sum, p) => sum + p.score, 0) / totalPlayers;
-        
         db.query(
             'INSERT INTO quiz_statistics (quiz_id, total_players, average_score, completed_at) VALUES (?, ?, ?, NOW())',
             [game.quizData.id, totalPlayers, averageScore],
-            (err) => {
-                if (err) console.error('Ошибка сохранения статистики:', err);
-            }
+            err => { if (err) console.error('Stat save error:', err); }
         );
     }
-    
-    games.delete(gameCode);
+
+    // Удаляем игру из хранилища через 10 секунд
+    setTimeout(() => {
+        games.delete(game.code);
+    }, 10000);
 }
 
-// Обработка WebSocket соединений
+// Обработка сообщений от ведущего
+function handleHostMessage(ws, game, message) {
+    switch (message.type) {
+        case 'start_game':
+            if (game.state !== 'waiting') return;
+            game.state = 'active';
+            game.quizData = message.quizData;
+            game.currentSlide = -1; // будет увеличен в nextSlide
+            game.answers = new Map();
+
+            // Сообщаем игрокам о старте
+            broadcastToGame(game, {
+                type: 'game_started',
+                quizTitle: game.quizData.title,
+                totalSlides: game.quizData.slides.length
+            });
+
+            // Пауза 3 секунды, затем первый слайд
+            setTimeout(() => {
+                if (game.state === 'active') {
+                    nextSlide(game);
+                }
+            }, 3000);
+            break;
+
+        case 'next_slide':
+            if (game.state === 'active') {
+                // Принудительное завершение текущего слайда
+                finishSlide(game);
+            }
+            break;
+
+        case 'end_game':
+            endGame(game);
+            break;
+    }
+}
+
+// Обработка сообщений от игрока
+function handlePlayerMessage(ws, game, player, message) {
+    if (game.state !== 'active') return;
+    if (message.type === 'answer') {
+        // Проверяем, не отвечал ли уже игрок на этот слайд
+        if (game.answers.has(player.id)) {
+            ws.send(JSON.stringify({ type: 'error', message: 'Вы уже ответили' }));
+            return;
+        }
+        const responseTime = Date.now() - game.slideStartTime;
+        const duration = (game.quizData.slide_duration || 30) * 1000;
+        if (responseTime > duration) {
+            ws.send(JSON.stringify({ type: 'error', message: 'Время вышло' }));
+            return;
+        }
+        game.answers.set(player.id, {
+            optionIndex: message.optionIndex,
+            responseTime: responseTime
+        });
+        ws.send(JSON.stringify({ type: 'answer_received' }));
+    }
+}
+
+// WebSocket обработка подключений
 wss.on('connection', (ws, req) => {
-    const url = new URL(req.url, `http://${req.headers.host}`);
-    const role = url.searchParams.get('role');
-    const gameCode = url.searchParams.get('code');
-    const playerName = url.searchParams.get('name');
-    
-    console.log(`Новое подключение: role=${role}, code=${gameCode}, name=${playerName}`);
-    
+    const params = url.parse(req.url, true).query;
+    const role = params.role; // 'host' или 'player'
+    const code = params.code;
+    const playerName = params.name;
+
     if (role === 'host') {
         // Создание новой игры
-        const newGameCode = generateGameCode();
-        
-        games.set(newGameCode, {
-            code: newGameCode,
+        const gameCode = generateGameCode();
+        const game = {
+            code: gameCode,
             host: ws,
             players: new Map(),
+            state: 'waiting', // waiting, active, finished
             quizData: null,
             currentSlide: -1,
-            slideStartTime: null,
-            status: 'waiting', // waiting, active, finished
-            currentSlideAnswers: new Map(),
-            slideTimer: null
-        });
-        
+            answers: null,
+            slideTimer: null,
+            slideStartTime: null
+        };
+        games.set(gameCode, game);
+
         ws.send(JSON.stringify({
             type: 'game_created',
-            code: newGameCode,
-            message: 'Игра создана успешно'
+            code: gameCode,
+            message: 'Игра создана'
         }));
-        
-        console.log(`Создана игра с кодом: ${newGameCode}`);
-        
-    } else if (role === 'player' && gameCode) {
-        // Подключение игрока к существующей игре
-        const game = games.get(gameCode);
-        
+        console.log(`Игра ${gameCode} создана`);
+
+        ws.on('message', data => {
+            try {
+                const message = JSON.parse(data);
+                handleHostMessage(ws, game, message);
+            } catch (err) {
+                console.error('Host message error:', err);
+            }
+        });
+
+        ws.on('close', () => {
+            // Ведущий отключился – завершаем игру
+            if (games.has(gameCode)) {
+                endGame(game);
+                games.delete(gameCode);
+                console.log(`Игра ${gameCode} завершена (хост отключился)`);
+            }
+        });
+
+    } else if (role === 'player' && code) {
+        const game = games.get(code);
         if (!game) {
-            ws.send(JSON.stringify({
-                type: 'error',
-                message: 'Игра не найдена'
-            }));
+            ws.send(JSON.stringify({ type: 'error', message: 'Игра не найдена' }));
             ws.close();
             return;
         }
-        
-        if (game.status !== 'waiting') {
-            ws.send(JSON.stringify({
-                type: 'error',
-                message: 'Игра уже началась'
-            }));
+        if (game.state !== 'waiting') {
+            ws.send(JSON.stringify({ type: 'error', message: 'Игра уже началась' }));
             ws.close();
             return;
         }
-        
+        if (!playerName || playerName.trim() === '') {
+            ws.send(JSON.stringify({ type: 'error', message: 'Имя не указано' }));
+            ws.close();
+            return;
+        }
+
         const playerId = Math.random().toString(36).substr(2, 9);
-        game.players.set(ws, {
+        const player = {
             id: playerId,
-            name: playerName,
+            name: playerName.trim(),
             score: 0,
             ws: ws
-        });
-        
+        };
+        game.players.set(ws, player);
+
         ws.send(JSON.stringify({
             type: 'connected',
             playerId: playerId,
             message: `Добро пожаловать, ${playerName}!`
         }));
-        
+
         // Уведомляем ведущего о новом игроке
-        sendToHost(gameCode, {
+        sendToHost(game, {
             type: 'player_joined',
-            player: {
-                id: playerId,
-                name: playerName
-            },
+            player: { id: playerId, name: player.name },
             totalPlayers: game.players.size
         });
-        
-        console.log(`Игрок ${playerName} присоединился к игре ${gameCode}`);
-    }
-    
-    // Обработка сообщений от клиентов
-    ws.on('message', (data) => {
-        try {
-            const message = JSON.parse(data);
-            console.log('Получено сообщение:', message);
-            
-            if (role === 'host') {
-                handleHostMessage(ws, gameCode, message);
-            } else if (role === 'player') {
-                handlePlayerMessage(ws, gameCode, message);
+
+        ws.on('message', data => {
+            try {
+                const message = JSON.parse(data);
+                handlePlayerMessage(ws, game, player, message);
+            } catch (err) {
+                console.error('Player message error:', err);
             }
-        } catch (error) {
-            console.error('Ошибка обработки сообщения:', error);
-        }
-    });
-    
-    ws.on('close', () => {
-        console.log('Клиент отключился');
-        
-        if (role === 'host' && gameCode) {
-            // Ведущий отключился - завершаем игру
-            const game = games.get(gameCode);
-            if (game) {
-                broadcastToGame(gameCode, {
-                    type: 'game_ended',
-                    message: 'Ведущий завершил игру'
-                });
-                games.delete(gameCode);
-            }
-        } else if (role === 'player' && gameCode) {
+        });
+
+        ws.on('close', () => {
             // Игрок отключился
-            const game = games.get(gameCode);
-            if (game) {
-                let disconnectedPlayer = null;
-                for (let [client, player] of game.players) {
-                    if (client === ws) {
-                        disconnectedPlayer = player;
-                        game.players.delete(client);
-                        break;
-                    }
-                }
-                
-                if (disconnectedPlayer) {
-                    sendToHost(gameCode, {
-                        type: 'player_left',
-                        player: {
-                            id: disconnectedPlayer.id,
-                            name: disconnectedPlayer.name
-                        },
-                        totalPlayers: game.players.size
-                    });
-                }
-            }
-        }
-    });
+            game.players.delete(ws);
+            sendToHost(game, {
+                type: 'player_left',
+                player: { id: player.id, name: player.name },
+                totalPlayers: game.players.size
+            });
+        });
+    } else {
+        ws.close();
+    }
 });
 
-// Обработка сообщений от ведущего
-function handleHostMessage(ws, gameCode, message) {
-    const game = games.get(gameCode);
-    if (!game) return;
-    
-    switch (message.type) {
-        case 'start_game':
-            if (game.players.size === 0) {
-                ws.send(JSON.stringify({
-                    type: 'error',
-                    message: 'Нет подключенных игроков'
-                }));
-                return;
-            }
-            
-            game.status = 'active';
-            game.quizData = message.quizData;
-            game.currentSlide = -1;
-            game.currentSlideAnswers.clear();
-            
-            // Уведомляем всех игроков о начале игры
-            broadcastToGame(gameCode, {
-                type: 'game_started',
-                quizTitle: game.quizData.title,
-                totalSlides: game.quizData.slides.length
-            });
-            
-            // Показываем заставку 3 секунды, затем первый вопрос
-            setTimeout(() => {
-                nextSlide(gameCode);
-            }, 3000);
-            break;
-            
-        case 'stop_answers':
-            if (game.status === 'active' && game.slideTimer) {
-                finishSlide(gameCode);
-            }
-            break;
-            
-        case 'end_game':
-            endGame(gameCode);
-            break;
-    }
-}
-
-// Обработка сообщений от игроков
-function handlePlayerMessage(ws, gameCode, message) {
-    const game = games.get(gameCode);
-    if (!game || game.status !== 'active') return;
-    
-    switch (message.type) {
-        case 'answer':
-            const player = game.players.get(ws);
-            if (!player) return;
-            
-            // Проверяем, не отвечал ли уже игрок на этот слайд
-            if (game.currentSlideAnswers.has(player.id)) {
-                ws.send(JSON.stringify({
-                    type: 'error',
-                    message: 'Вы уже ответили на этот вопрос'
-                }));
-                return;
-            }
-            
-            const responseTime = Date.now() - game.slideStartTime;
-            const slideDuration = (game.quizData.slide_duration || 30) * 1000;
-            
-            // Проверяем, не истекло ли время
-            if (responseTime > slideDuration) {
-                ws.send(JSON.stringify({
-                    type: 'error',
-                    message: 'Время вышло'
-                }));
-                return;
-            }
-            
-            game.currentSlideAnswers.set(player.id, {
-                optionIndex: message.optionIndex,
-                responseTime: responseTime
-            });
-            
-            ws.send(JSON.stringify({
-                type: 'answer_received',
-                message: 'Ответ принят'
-            }));
-            break;
-    }
-}
-
-// Запуск сервера
 const PORT = 8080;
 server.listen(PORT, () => {
     console.log(`WebSocket сервер запущен на порту ${PORT}`);
-    console.log(`WS URL: ws://localhost:${PORT}`);
 });

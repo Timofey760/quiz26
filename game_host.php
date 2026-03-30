@@ -21,7 +21,7 @@ if ($quiz_id) {
     $result = $stmt->get_result();
     $quiz = $result->fetch_assoc();
     $stmt->close();
-    
+
     if ($quiz) {
         $stmt = $conn->prepare("SELECT * FROM slides WHERE quiz_id = ? ORDER BY slide_order ASC");
         $stmt->bind_param("i", $quiz_id);
@@ -161,11 +161,6 @@ if (!$quiz || empty($slides)) {
             color: white;
         }
 
-        .btn-success {
-            background: #28a745;
-            color: white;
-        }
-
         .btn-warning {
             background: #ffc107;
             color: #333;
@@ -258,7 +253,7 @@ if (!$quiz || empty($slides)) {
 </head>
 <body>
     <div class="loading" id="loading">Подключение к серверу...</div>
-    
+
     <div class="container">
         <div class="header">
             <h1>🎮 Ведущий: <?php echo htmlspecialchars($quiz['title']); ?></h1>
@@ -266,26 +261,26 @@ if (!$quiz || empty($slides)) {
                 Код игры: <span id="gameCode">---</span>
             </div>
         </div>
-        
+
         <div class="players-panel">
             <h3>👥 Игроки (<span id="playersCount">0</span>)</h3>
             <div class="players-list" id="playersList"></div>
         </div>
-        
+
         <div class="game-controls">
             <div class="status" id="gameStatus">Ожидание подключения игроков</div>
             <button class="btn btn-primary" id="startGameBtn" onclick="startGame()" disabled>🚀 Начать игру</button>
-            <button class="btn btn-warning" id="stopAnswersBtn" onclick="stopAnswers()" style="display: none;">⏸️ Завершить приём ответов</button>
+            <button class="btn btn-warning" id="nextSlideBtn" onclick="nextSlide()" style="display: none;">⏩ Следующий вопрос</button>
             <button class="btn btn-danger" id="endGameBtn" onclick="endGame()" disabled>⏹️ Завершить игру</button>
         </div>
-        
+
         <div class="current-question" id="currentQuestionPanel">
             <h3>Текущий вопрос</h3>
             <div class="question-text" id="questionText"></div>
         </div>
-        
+
         <div class="results-panel" id="resultsPanel">
-            <h3>📊 Результаты</h3>
+            <h3>📊 Результаты вопроса</h3>
             <div id="resultsList"></div>
         </div>
     </div>
@@ -295,36 +290,36 @@ if (!$quiz || empty($slides)) {
         let gameCode = null;
         let quizData = null;
         let isGameActive = false;
-        
+
         const quizId = <?php echo $quiz_id; ?>;
         const quizTitle = <?php echo json_encode($quiz['title']); ?>;
         const slides = <?php echo json_encode($slides); ?>;
         const slideDuration = <?php echo $quiz['slide_duration'] ?? 30; ?>;
-        
+
         // Подключение к WebSocket
         function connect() {
             const loading = document.getElementById('loading');
             loading.style.display = 'block';
-            
+
             ws = new WebSocket('ws://localhost:8080?role=host');
-            
+
             ws.onopen = () => {
                 loading.style.display = 'none';
                 console.log('Подключено к серверу');
             };
-            
+
             ws.onmessage = (event) => {
                 const data = JSON.parse(event.data);
-                console.log('Получено сообщение:', data);
+                console.log('Получено:', data);
                 handleMessage(data);
             };
-            
+
             ws.onerror = (error) => {
                 console.error('WebSocket ошибка:', error);
                 loading.style.display = 'none';
                 alert('Ошибка подключения к серверу. Убедитесь, что сервер запущен.');
             };
-            
+
             ws.onclose = () => {
                 console.log('Отключено от сервера');
                 if (isGameActive) {
@@ -332,188 +327,167 @@ if (!$quiz || empty($slides)) {
                 }
             };
         }
-        
+
         // Обработка сообщений
         function handleMessage(data) {
-            switch(data.type) {
+            switch (data.type) {
                 case 'game_created':
                     gameCode = data.code;
                     document.getElementById('gameCode').innerHTML = `<span>${gameCode}</span>`;
                     document.getElementById('startGameBtn').disabled = false;
                     break;
-                    
+
                 case 'player_joined':
-                    updatePlayersList(data.player, 'add');
+                    addPlayer(data.player);
                     document.getElementById('playersCount').textContent = data.totalPlayers;
                     break;
-                    
+
                 case 'player_left':
-                    updatePlayersList(data.player, 'remove');
+                    removePlayer(data.player.id);
                     document.getElementById('playersCount').textContent = data.totalPlayers;
                     break;
-                    
+
                 case 'game_started':
                     isGameActive = true;
                     document.getElementById('gameStatus').textContent = 'Игра идёт';
                     document.getElementById('gameStatus').className = 'status status-active';
-                    document.getElementById('startGameBtn').disabled = true;
+                    document.getElementById('startGameBtn').style.display = 'none';
+                    document.getElementById('nextSlideBtn').style.display = 'inline-block';
                     document.getElementById('endGameBtn').disabled = false;
                     break;
-                    
+
                 case 'new_question':
-                    showCurrentQuestion(data);
-                    document.getElementById('stopAnswersBtn').style.display = 'inline-block';
-                    document.getElementById('currentQuestionPanel').style.display = 'block';
+                    showCurrentQuestion(data.slide, data.slideNumber, data.totalSlides);
+                    document.getElementById('resultsPanel').style.display = 'none';
                     break;
-                    
+
                 case 'slide_results':
                     showSlideResults(data);
-                    document.getElementById('stopAnswersBtn').style.display = 'none';
                     break;
-                    
+
                 case 'game_ended':
                     showGameResults(data);
                     isGameActive = false;
                     document.getElementById('gameStatus').textContent = 'Игра завершена';
                     document.getElementById('gameStatus').className = 'status status-finished';
+                    document.getElementById('nextSlideBtn').style.display = 'none';
                     document.getElementById('endGameBtn').disabled = true;
-                    document.getElementById('stopAnswersBtn').style.display = 'none';
                     break;
             }
         }
-        
-        // Обновление списка игроков
-        function updatePlayersList(player, action) {
+
+        function addPlayer(player) {
             const playersList = document.getElementById('playersList');
-            
-            if (action === 'add') {
-                const playerCard = document.createElement('div');
-                playerCard.className = 'player-card';
-                playerCard.id = `player_${player.id}`;
-                playerCard.innerHTML = `
-                    <span class="player-name">${escapeHtml(player.name)}</span>
-                    <span class="player-score">0</span>
-                `;
-                playersList.appendChild(playerCard);
-            } else if (action === 'remove') {
-                const playerCard = document.getElementById(`player_${player.id}`);
-                if (playerCard) playerCard.remove();
-            }
+            const existing = document.getElementById(`player_${player.id}`);
+            if (existing) return;
+            const playerCard = document.createElement('div');
+            playerCard.className = 'player-card';
+            playerCard.id = `player_${player.id}`;
+            playerCard.innerHTML = `
+                <span class="player-name">${escapeHtml(player.name)}</span>
+                <span class="player-score">0</span>
+            `;
+            playersList.appendChild(playerCard);
         }
-        
-        // Обновление очков игроков
-        function updatePlayerScore(playerId, score) {
+
+        function removePlayer(playerId) {
             const playerCard = document.getElementById(`player_${playerId}`);
-            if (playerCard) {
-                const scoreSpan = playerCard.querySelector('.player-score');
+            if (playerCard) playerCard.remove();
+        }
+
+        function updatePlayerScore(playerId, score) {
+            const card = document.getElementById(`player_${playerId}`);
+            if (card) {
+                const scoreSpan = card.querySelector('.player-score');
                 if (scoreSpan) scoreSpan.textContent = score;
             }
         }
-        
-        // Показ текущего вопроса
-        function showCurrentQuestion(data) {
+
+        function showCurrentQuestion(slide, slideNumber, totalSlides) {
+            const panel = document.getElementById('currentQuestionPanel');
             const questionText = document.getElementById('questionText');
-            questionText.innerHTML = data.slide.question_text;
-            questionText.style.fontSize = (data.slide.font_size || 24) + 'px';
-            questionText.style.color = data.slide.font_color || '#000000';
+            panel.style.display = 'block';
+            questionText.innerHTML = `<strong>Вопрос ${slideNumber} из ${totalSlides}</strong><br>${escapeHtml(slide.question_text)}`;
+            questionText.style.fontSize = (slide.font_size || 24) + 'px';
+            questionText.style.color = slide.font_color || '#000000';
         }
-        
-        // Показ результатов слайда
+
         function showSlideResults(data) {
-            const resultsPanel = document.getElementById('resultsPanel');
+            const panel = document.getElementById('resultsPanel');
             const resultsList = document.getElementById('resultsList');
-            
-            resultsList.innerHTML = '<h4>Результаты вопроса ' + data.slideNumber + ':</h4>';
-            
+            resultsList.innerHTML = `<h4>Результаты вопроса ${data.slideNumber}:</h4>`;
+
             data.results.forEach(result => {
-                const resultDiv = document.createElement('div');
-                resultDiv.className = 'result-item';
-                resultDiv.innerHTML = `
+                const div = document.createElement('div');
+                div.className = 'result-item';
+                div.innerHTML = `
                     <span><strong>${escapeHtml(result.playerName)}</strong></span>
                     <span class="${result.isCorrect ? 'result-correct' : 'result-wrong'}">
-                        ${result.isCorrect ? '✓ Правильно! +' + result.points : '✗ Неправильно'}
+                        ${result.isCorrect ? `✓ +${result.points}` : '✗ 0'}
                     </span>
-                    <span>Всего очков: ${result.score}</span>
+                    <span>Всего: ${result.score}</span>
                 `;
-                resultsList.appendChild(resultDiv);
+                resultsList.appendChild(div);
                 updatePlayerScore(result.playerId, result.score);
             });
-            
-            resultsPanel.style.display = 'block';
-            
-            setTimeout(() => {
-                resultsPanel.style.display = 'none';
-            }, 4000);
+            panel.style.display = 'block';
         }
-        
-        // Показ финальных результатов
+
         function showGameResults(data) {
-            const resultsPanel = document.getElementById('resultsPanel');
+            const panel = document.getElementById('resultsPanel');
             const resultsList = document.getElementById('resultsList');
-            
-            resultsList.innerHTML = '<h3>🏆 Итоговые результаты 🏆</h3>';
-            
-            data.results.forEach((result, index) => {
-                const resultDiv = document.createElement('div');
-                resultDiv.className = 'result-item';
-                resultDiv.innerHTML = `
-                    <span>${index + 1}. <strong>${escapeHtml(result.name)}</strong></span>
+            resultsList.innerHTML = '<h2>🏆 Итоговые результаты 🏆</h2>';
+            data.results.forEach((result, idx) => {
+                const div = document.createElement('div');
+                div.className = 'result-item';
+                div.innerHTML = `
+                    <span>${idx + 1}. <strong>${escapeHtml(result.name)}</strong></span>
                     <span class="result-correct">${result.score} очков</span>
                 `;
-                resultsList.appendChild(resultDiv);
+                resultsList.appendChild(div);
             });
-            
-            resultsPanel.style.display = 'block';
+            panel.style.display = 'block';
             document.getElementById('currentQuestionPanel').style.display = 'none';
         }
-        
-        // Начать игру
+
         function startGame() {
             if (!ws || ws.readyState !== WebSocket.OPEN) {
                 alert('Нет подключения к серверу');
                 return;
             }
-            
             quizData = {
                 id: quizId,
                 title: quizTitle,
                 slides: slides,
                 slide_duration: slideDuration
             };
-            
             ws.send(JSON.stringify({
                 type: 'start_game',
                 quizData: quizData
             }));
         }
-        
-        // Завершить приём ответов
-        function stopAnswers() {
+
+        function nextSlide() {
             if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({
-                    type: 'stop_answers'
-                }));
+                ws.send(JSON.stringify({ type: 'next_slide' }));
             }
         }
-        
-        // Завершить игру
+
         function endGame() {
             if (confirm('Завершить игру?')) {
                 if (ws && ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({
-                        type: 'end_game'
-                    }));
+                    ws.send(JSON.stringify({ type: 'end_game' }));
                 }
             }
         }
-        
+
         function escapeHtml(text) {
+            if (!text) return '';
             const div = document.createElement('div');
             div.textContent = text;
             return div.innerHTML;
         }
-        
-        // Подключаемся при загрузке страницы
+
         connect();
     </script>
 </body>

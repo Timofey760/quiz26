@@ -89,15 +89,6 @@ session_start();
             box-shadow: 0 10px 20px rgba(0,0,0,0.2);
         }
 
-        .error {
-            background: #fee;
-            color: #c33;
-            padding: 10px;
-            border-radius: 10px;
-            margin-bottom: 20px;
-            text-align: center;
-        }
-
         .game-info {
             margin-top: 20px;
             padding: 15px;
@@ -112,21 +103,21 @@ session_start();
 <body>
     <div class="join-container">
         <h1>🎮 Подключение к игре</h1>
-        
+
         <form id="joinForm">
             <div class="form-group">
                 <label>Код игры (4 буквы)</label>
                 <input type="text" id="gameCode" class="code-input" maxlength="4" placeholder="ABCD" required autocomplete="off">
             </div>
-            
+
             <div class="form-group">
                 <label>Ваше имя</label>
                 <input type="text" id="playerName" maxlength="20" placeholder="Введите ваше имя" required>
             </div>
-            
+
             <button type="submit" class="btn-join">Присоединиться</button>
         </form>
-        
+
         <div class="game-info">
             💡 Введите 4-буквенный код, который показывает ведущий
         </div>
@@ -135,25 +126,23 @@ session_start();
     <script>
         document.getElementById('joinForm').addEventListener('submit', (e) => {
             e.preventDefault();
-            
+
             const gameCode = document.getElementById('gameCode').value.toUpperCase().trim();
             const playerName = document.getElementById('playerName').value.trim();
-            
+
             if (!gameCode || gameCode.length !== 4) {
                 alert('Введите корректный код игры (4 буквы)');
                 return;
             }
-            
+
             if (!playerName) {
                 alert('Введите ваше имя');
                 return;
             }
-            
-            // Перенаправляем на страницу игры
-            window.location.href = `game_player.php?code=${gameCode}&name=${encodeURIComponent(playerName)}`;
+
+            window.location.href = `game_player.php?code=${encodeURIComponent(gameCode)}&name=${encodeURIComponent(playerName)}`;
         });
-        
-        // Автоматический перевод в верхний регистр
+
         document.getElementById('gameCode').addEventListener('input', (e) => {
             e.target.value = e.target.value.toUpperCase();
         });

@@ -333,6 +333,7 @@ if (!$gameCode || !$playerName) {
             }
         }
 
+        
         function showQuestion(slide) {
             hasAnswered = false;
             document.getElementById('questionContainer').style.display = 'block';
